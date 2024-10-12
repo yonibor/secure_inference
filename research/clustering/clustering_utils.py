@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 
+
 from sklearn.metrics import pairwise_distances
 from sklearn.cluster import AffinityPropagation
 from sklearn.exceptions import ConvergenceWarning
@@ -46,7 +47,26 @@ def cluster_neurons(drelu_maps, no_converge_fail=True, precompute_affinity=True,
     return cluster_res
 
 
-def plot_clustering(cluster_res, H, W):
+def plot_drelu(drelu, save_path=None, title=None):
+    plt.close("all")
+    plt.figure(1)
+    plt.clf()
+    plt.imshow(np.squeeze(drelu), origin='lower')
+    plt.colorbar()
+    
+    if title is not None:
+        plt.title(title)
+    if save_path is None:
+        plt.show()
+    else:
+        plt.savefig(save_path)
+
+
+
+def plot_clustering(cluster_res, H, W, save_path=None,
+                    title=None):
+    if cluster_res is None:
+        return
     cluster_centers_indices = cluster_res.cluster_centers_indices_
     labels = cluster_res.labels_
 
@@ -74,6 +94,13 @@ def plot_clustering(cluster_res, H, W):
             plt.plot(
                 [cluster_center[0], x[0]], [cluster_center[1], x[1]], color=col["color"]
             )
-
-    plt.title("Estimated number of clusters: %d" % n_clusters_)
-    plt.show()
+    prefix = f"Estimated number of clusters: {n_clusters_}" 
+    if title is not None:
+        title = f'{prefix}\n{title}'
+    else:
+        title = prefix
+    plt.title(title)
+    if save_path is None:
+        plt.show()
+    else:
+        plt.savefig(save_path)

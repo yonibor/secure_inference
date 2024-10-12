@@ -38,5 +38,5 @@ dist_params = dict(backend='gloo')
 log_level = 'INFO'
 load_from = None
 resume_from = None
-evaluation = dict(interval=10, by_epoch=True)
+# evaluation = dict(interval=10, by_epoch=True)
 workflow = [('train', 10), ('val', 1)]

@@ -225,7 +225,6 @@ class ChannelDistortionHandler:
         os.makedirs(self.output_path, exist_ok=True)
 
         for layer_name in self.params.LAYER_NAMES:
-
             block_sizes = self.params.LAYER_NAME_TO_BLOCK_SIZES[layer_name]
             layer_num_channels = self.params.LAYER_NAME_TO_DIMS[layer_name][0]
             input_block_name = self.params.LAYER_NAME_TO_BLOCK_NAME[layer_name]

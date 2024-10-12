@@ -23,7 +23,7 @@ class ClusterRelu(nn.Module):
         prototype_x = x[:, self.channel_indices, rows, cols]
 
         # Calculate ReLU map and apply it
-        relu_map = (x * (1 - self.inter) + prototype_x * self.inter).gt_(0)
+        relu_map = (x * (1 - self.inter) + prototype_x * self.inter).gt(0)
         output = x * relu_map
 
         return output
