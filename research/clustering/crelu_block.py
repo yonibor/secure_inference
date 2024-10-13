@@ -8,22 +8,30 @@ class ClusterRelu(nn.Module):
     def __init__(self, C, H, W, prototype=None, inter: Union[float, int, np.ndarray, torch.Tensor]=0):
         super(ClusterRelu, self).__init__()
         self.C, self.H, self.W = C, H, W
-        self._prototype = self._inter = None
+        self._prototype = self._inter = self._active_channels = None
         self.prototype = prototype
         self.inter = inter
-
+        self.active_channels = torch.arange(C)
+        
         self.channel_indices = nn.Parameter(torch.arange(C).view(C, 1, 1).repeat(1, H, W),
                                             requires_grad=False) # technical, used for selecting the prototypes
         
     def forward(self, x):
+        not_active_channels = [c for c in range(x.shape[1]) if c not in self.active_channels]
+        not_active_x = x[:, not_active_channels]
+        pos_not_active_x = not_active_x.gt(0)
         # Extract row and col indices from prototype
-        rows, cols = self.prototype[0], self.prototype[1]
+        active_prototype = self.prototype[:, self.active_channels]
+        rows, cols = active_prototype[0], active_prototype[1]
 
         # Gather prototype values using ellipsis indexing
-        prototype_x = x[:, self.channel_indices, rows, cols]
+        prototype_x = x[:, self.channel_indices[self.active_channels], rows, cols]
 
         # Calculate ReLU map and apply it
-        relu_map = (x * (1 - self.inter) + prototype_x * self.inter).gt(0)
+        active_inter = self.inter[self.active_channels]
+        relu_map = torch.zeros(size=x.shape, dtype=torch.bool, device=x.device)
+        x_inter = x[:, self.active_channels] * (1 - active_inter) + prototype_x * active_inter
+        relu_map[:, self.active_channels] = x_inter.gt(0)
         output = x * relu_map
 
         return output
@@ -40,7 +48,7 @@ class ClusterRelu(nn.Module):
             else:
                 new_prototype = new_prototype.clone() 
         else:
-            new_prototype = _create_default_prototype(C=self.C, H=self.H, W=self.W)
+            new_prototype = create_default_prototype(C=self.C, H=self.H, W=self.W)
         if self._prototype is None:
             self._prototype = nn.Parameter(new_prototype, requires_grad=False)
         else:
@@ -67,20 +75,22 @@ class ClusterRelu(nn.Module):
             else:
                 self._inter.copy_(new_inter)
     
-def _create_default_prototype(C, H, W):
+    @property
+    def active_channels(self):
+        return self._active_channels
+    
+    @active_channels.setter
+    def active_channels(self, new_channels):
+        if not isinstance(new_channels, torch.Tensor):
+            new_channels = torch.tensor(new_channels, dtype=torch.long)
+        else:
+            new_channels = new_channels.long()
+        if self._active_channels is not None:
+            new_channels = new_channels.to(self._active_channels.device)
+        assert torch.all(torch.diff(new_channels) > 0), 'need to be sorted'
+        self._active_channels = nn.Parameter(new_channels, requires_grad=False)
+    
+def create_default_prototype(C, H, W):
     prototype = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
     prototype = torch.stack(prototype, dim=0).unsqueeze(1).repeat(1, C, 1, 1)
-    return prototype
-    
-def prototype_from_clusters(C, H, W, channel_clusters={}) -> ClusterRelu:
-    prototype = _create_default_prototype(C=C, H=H, W=W)
-    for channel, cluster_res in channel_clusters.items():
-        cluster_centers_indices = cluster_res.cluster_centers_indices_
-        labels = cluster_res.labels_.reshape(H, W)
-        for label, cluster_idx in enumerate(cluster_centers_indices):
-            label_rows, label_cols = np.nonzero(labels == label)
-            center_row = cluster_idx // W 
-            center_col = cluster_idx % W
-            prototype[0, channel, label_rows, label_cols] = center_row
-            prototype[1, channel, label_rows, label_cols] = center_col
     return prototype

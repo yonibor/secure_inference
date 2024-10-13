@@ -6,8 +6,11 @@ FROM pytorch/pytorch:${PYTORCH}-cuda${CUDA}-cudnn${CUDNN}-devel
 
 RUN conda install torchvision==0.12.0 -y
 RUN conda install numba==0.55.1 -y
+RUN conda install matplotlib -y
 RUN conda install scikit-learn -y
 RUN conda install ipympl -y
+RUN conda install pandas -y
+RUN conda install conda-forge::wandb -y
 
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install yapf==0.40.1 && \
@@ -15,7 +18,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install mmsegmentation==0.27.0 && \
     pip install jupyter
     
-RUN conda install 'matplotlib>=3.7.5' -y
 RUN apt-get update; apt-get install ffmpeg libsm6 libxext6 nano screen -y
 
 WORKDIR /usr/local/bin

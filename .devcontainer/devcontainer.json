@@ -1,6 +1,6 @@
 {
 	"name": "my_dev_container",
-	"image": "secure:plt_fix2",
+	"image": "secure:wandb",
 	// "workspaceFolder": "/data",
 	// "runArgs": ["--rm", "--gpus=all", "-v", "C:\\Users\\yonib\\OneDrive\\Desktop\\studies\\masters\\thesis\\shai_intro_project\\drelu_clustering\\secure_inference\\secure_inference:/data"],
 	"runArgs": ["--rm", "--gpus=all", "--name", "my_dev_container"],

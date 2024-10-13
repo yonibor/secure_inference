@@ -4,6 +4,7 @@ import os
 import os.path as osp
 import time
 import warnings
+import wandb
 
 import mmcv
 import torch
@@ -20,9 +21,12 @@ from mmcls.utils import (auto_select_device, collect_env, get_root_logger,
 from research.mmlab_extension.classification.resnet_cifar_v2 import ResNet_CIFAR_V2
 
 from research.clustering.crelu_manager import add_crelu_hooks
+from research.clustering.crelu_logger import CreluLogger
 
 
-def run_train(work_dir, max_iters, validate):
+def run_train(work_dir, max_iters, warmup, cooldown, validate):
+    wandb.login(key='8b56dc84c3fadaca2c8e6bd08ad7fc57d24c2225')
+
     config_path = '/workspaces/secure_inference/research/configs/classification/resnet/resnet18_cifar100/baseline.py'
     ckpt = '/workspaces/secure_inference/tests/resnet18_10_8/latest.pth'
     device = 'cuda'
@@ -42,7 +46,16 @@ def run_train(work_dir, max_iters, validate):
     cfg.lr_config = None
     cfg.workflow[0] = ('train', 5)
     cfg.workflow[1] = ('val', 0)
-    cfg.evaluation = dict(interval=12, by_epoch=False)
+    cfg.evaluation = dict(interval=40, by_epoch=False)
+
+    folder_name = os.path.basename(work_dir.rstrip('/'))
+    cfg.log_config.hooks.append(
+       dict(type='WandbLoggerHook',
+         init_kwargs={'project': 'private_inference', 
+                      'name': folder_name},
+         interval=10,
+         by_epoch=False)
+    )
 
     cfg.gpu_ids = range(1)
     cfg.work_dir = work_dir
@@ -91,8 +104,8 @@ def run_train(work_dir, max_iters, validate):
     if 'distortion_extraction' in cfg.data:
         del cfg.data['distortion_extraction']
 
-    hooks = _add_crelu_hooks(model, cfg)
-    torch.autograd.set_detect_anomaly(True)
+    hooks = _add_crelu_hooks(model, cfg, warmup, cooldown)
+    # torch.autograd.set_detect_anomaly(True)
 
     train_model(
         model,
@@ -108,18 +121,16 @@ def run_train(work_dir, max_iters, validate):
     # test(model, cfg)
     # test2(model, cfg)
 
-def _add_crelu_hooks(model, cfg):
-    plot = True
+def _add_crelu_hooks(model, cfg, warmup, cooldown):
+    plot = False
     update_on_start = False
-    cluster_update_freq = 4
-    warmup = 12
-    # warmup = 0
+    cluster_update_freq = 20
     only_during_training = True
     cluster_no_converge_fail = True
     
 
     conf = {
-        'max_iters': cfg.runner.max_iters,
+        'max_iters': cfg.runner.max_iters - cooldown,
         'warmup': warmup,
         'only_during_training': only_during_training,
         'cluster': {
@@ -142,8 +153,7 @@ def _add_crelu_hooks(model, cfg):
             'await_cluster_start': True,
         },
         'drelu_stats': {
-            'update_freq': 1,
-            'update_on_start': True,
+            'batch_amount': 4,
         },
         'plot': {
             'update_freq': cluster_update_freq,
@@ -158,46 +168,10 @@ def _add_crelu_hooks(model, cfg):
     ]
     out_dir = osp.join(cfg.work_dir, 'crelu_res')
 
-    hooks = add_crelu_hooks(model, layers_for_hook, channel_idx=0,
+    hooks = add_crelu_hooks(model, layers_for_hook,
                             update_config=conf, plot=plot, out_dir=out_dir,
                             cluster_no_converge_fail=cluster_no_converge_fail)
     return hooks
-
-    
-def test(model, cfg):
-    # ckpt = '/workspaces/secure_inference/tests/23_9_single_channel_flow/epoch_3.pth'
-    ckpt = cfg.load_from
-    loader_cfg = dict(
-        # cfg.gpus will be ignored if distributed
-        num_gpus=1 if cfg.device == 'ipu' else len(cfg.gpu_ids),
-        dist=False,
-        round_up=True,
-    )
-    # The overall dataloader settings
-    loader_cfg.update({
-        k: v
-        for k, v in cfg.data.items() if k not in [
-            'train', 'val', 'test', 'train_dataloader', 'val_dataloader',
-            'test_dataloader'
-        ]
-    })
-    test_loader_cfg = {
-        **loader_cfg,
-        'shuffle': False,  # Not shuffle by default
-        'sampler_cfg': None,  # Not use sampler by default
-        **cfg.data.get('test_dataloader', {}),
-    }
-    # the extra round_up data will be removed during gpu/cpu collect
-    dataset = build_dataset(cfg.data.test, default_args=dict(test_mode=True))
-    data_loader = build_dataloader(dataset, **test_loader_cfg)
-
-    checkpoint = load_checkpoint(model, ckpt, cfg.device)
-    model = wrap_non_distributed_model(
-            model, device=cfg.device, device_ids=cfg.gpu_ids)
-    
-    outputs = single_gpu_test(model, data_loader)
-    eval_results = dataset.evaluate(results=outputs)
-    print(eval_results)
 
 
 def test2(model, cfg):
@@ -235,15 +209,18 @@ def test2(model, cfg):
         if i % 4 == 0:
             print(f"Processing batch {i}")
         out = model.forward_test(data['img'])
-        if i+1 >= 33:  # Stop after N examples
+        if i+1 >= 9:  # Stop after N examples
             break
 
 
 def main():
-    work_dir = '/workspaces/secure_inference/tests/25_9_single_channel_train_fixed'
-    max_iters = 49
+    work_dir = '/workspaces/secure_inference/tests/13_10_single_layer_logger_debug'
+    warmup = 12
+    cooldown = 300
+    max_iters = warmup + cooldown + 200
+    
     validate = True
-    run_train(work_dir, max_iters=max_iters, validate=validate)
+    run_train(work_dir, max_iters=max_iters, warmup=warmup, cooldown=cooldown, validate=validate)
 
 
 if __name__ == '__main__':
