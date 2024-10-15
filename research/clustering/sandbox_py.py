@@ -24,7 +24,8 @@ from research.clustering.crelu_manager import add_crelu_hooks
 from research.clustering.crelu_logger import CreluLogger
 
 
-def run_train(work_dir, max_iters, warmup, cooldown, validate):
+def run_train(work_dir, max_iters, warmup, cooldown, validate,
+              eval_interval):
     wandb.login(key='8b56dc84c3fadaca2c8e6bd08ad7fc57d24c2225')
 
     config_path = '/workspaces/secure_inference/research/configs/classification/resnet/resnet18_cifar100/baseline.py'
@@ -46,7 +47,7 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate):
     cfg.lr_config = None
     cfg.workflow[0] = ('train', 5)
     cfg.workflow[1] = ('val', 0)
-    cfg.evaluation = dict(interval=40, by_epoch=False)
+    cfg.evaluation = dict(interval=eval_interval, by_epoch=False)
 
     folder_name = os.path.basename(work_dir.rstrip('/'))
     cfg.log_config.hooks.append(
@@ -218,9 +219,11 @@ def main():
     warmup = 12
     cooldown = 300
     max_iters = warmup + cooldown + 200
+    eval_interval = 15
     
     validate = True
-    run_train(work_dir, max_iters=max_iters, warmup=warmup, cooldown=cooldown, validate=validate)
+    run_train(work_dir, max_iters=max_iters, warmup=warmup, cooldown=cooldown, 
+              validate=validate, eval_interval=eval_interval)
 
 
 if __name__ == '__main__':

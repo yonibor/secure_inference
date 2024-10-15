@@ -2,6 +2,7 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+import copy
 
 
 from sklearn.metrics import pairwise_distances
@@ -15,7 +16,7 @@ class ClusterConvergenceException(Exception):
         super().__init__(message)
 
 
-def _format_cluster_samples(drelu_maps):
+def format_cluster_samples(drelu_maps):
     if isinstance(drelu_maps, torch.Tensor):
         drelu_maps = drelu_maps.numpy()
     assert isinstance(drelu_maps, np.ndarray) and drelu_maps.ndim == 3, 'incorrect input format'
@@ -23,19 +24,24 @@ def _format_cluster_samples(drelu_maps):
     return samples
 
 
-def cluster_neurons(drelu_maps, no_converge_fail=True, precompute_affinity=True,
+def get_affinity_mat(drelu_maps):
+    samples = format_cluster_samples(drelu_maps)
+    affinity_mat = -pairwise_distances(samples, metric='hamming')
+    return affinity_mat
+
+
+def cluster_neurons(drelu_maps, prev_clusters,
+                    no_converge_fail=True, precompute_affinity=True,
                     preference_quantile=None):
-    results = {'all_zero': False, 'cluster_res': None, 
-               'failed_to_converge':False, 'same_label_affinity': None,
-               'diff_label_affinity': None}
+    results = {'clusters': prev_clusters, 'all_zero': False, 
+               'failed_to_converge': False}
     if not torch.any(drelu_maps):
         results['all_zero'] = True
         results['same_label_affinity'] = results['diff_label_affinity'] = 0
         return results
     assert not (not precompute_affinity and preference_quantile is not None), \
         'to get the prefrence you need to precomutpe the affinity matrix'
-    samples = _format_cluster_samples(drelu_maps)
-    affinity_mat = -pairwise_distances(samples, metric='hamming')
+    affinity_mat = get_affinity_mat(drelu_maps)
     preference = None
     if precompute_affinity:
         algo_input = affinity_mat
@@ -43,22 +49,25 @@ def cluster_neurons(drelu_maps, no_converge_fail=True, precompute_affinity=True,
         if preference_quantile is not None:
             preference = np.quantile(affinity_mat, preference_quantile)
     else:
-        algo_input = samples
+        algo_input = format_cluster_samples(drelu_maps)
         input_type = 'euclidean'
     with warnings.catch_warnings(record=True) as caught_warnings:
-        results['cluster_res'] = AffinityPropagation(random_state=42, affinity=input_type,
+        clusters = AffinityPropagation(random_state=42, affinity=input_type,
                                           preference=preference).fit(algo_input)
         for warning in caught_warnings:
             if warning.category == ConvergenceWarning and no_converge_fail:
                 results['failed_to_converge'] = True
-        if not results['failed_to_converge']:
-            results['same_label_affinity'], results['diff_label_affinity'] = \
-                _add_mean_dist(results['cluster_res'], affinity_mat)
+    if not results['failed_to_converge']:
+        results['clusters'] = clusters
+    results['same_label_affinity'], results['diff_label_affinity'] = \
+        get_mean_dist(results.get('clusters'), affinity_mat)
     return results
 
 
-def _add_mean_dist(cluster_res, affinity_mat):
-    labels = cluster_res.labels_
+def get_mean_dist(clusters, affinity_mat):
+    if clusters is None:
+        return None, None
+    labels = clusters.labels_
     same_label_mask = labels[:, None] == labels[None, :]
     same_label_affinity = affinity_mat[same_label_mask].mean()
     diff_label_affinity = affinity_mat[~same_label_mask].mean()
@@ -75,9 +84,9 @@ def format_clusters(C, H, W, channel_clusters={}, all_clusters=True) -> ClusterR
             active_channels.append(channel)
         if cluster_details['all_zero'] or cluster_details['failed_to_converge']:
             continue
-        cluster_res = cluster_details['cluster_res']
-        cluster_centers_indices = cluster_res.cluster_centers_indices_
-        labels = cluster_res.labels_.reshape(H, W)
+        clusters = cluster_details['clusters']
+        cluster_centers_indices = clusters.cluster_centers_indices_
+        labels = clusters.labels_.reshape(H, W)
         for label, cluster_idx in enumerate(cluster_centers_indices):
             label_rows, label_cols = np.nonzero(labels == label)
             center_row = cluster_idx // W 
@@ -104,12 +113,12 @@ def plot_drelu(drelu, save_path=None, title=None):
 
 
 
-def plot_clustering(cluster_res, H, W, save_path=None,
+def plot_clustering(clusters, H, W, save_path=None,
                     title=None):
-    if cluster_res is None:
+    if clusters is None:
         return
-    cluster_centers_indices = cluster_res.cluster_centers_indices_
-    labels = cluster_res.labels_
+    cluster_centers_indices = clusters.cluster_centers_indices_
+    labels = clusters.labels_
 
     n_clusters_ = len(cluster_centers_indices)
     

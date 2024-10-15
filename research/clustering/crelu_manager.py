@@ -8,7 +8,8 @@ from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar10
 
 from research.clustering.clustering_utils import (plot_clustering, 
                                                   cluster_neurons, ClusterConvergenceException,
-                                                  plot_drelu, format_clusters)
+                                                  plot_drelu, format_clusters, get_affinity_mat,
+                                                  get_mean_dist)
 from model_handling import get_layer, set_layer
 from research.clustering.crelu_block import ClusterRelu
 from research.clustering.crelu_logger import CreluLogger
@@ -32,7 +33,7 @@ class CreluManager:
 
         self.batch_idx = None
         self.drelu_maps = self.prev_drelu_maps = None # TODO: remove yoni
-        self.cur_cluster_res, self.cur_mean_drelu_maps = {}, {}
+        self.cur_cluster_details, self.cur_mean_drelu_maps = {}, {}
         self.cur_min_inter = self.cur_max_inter = None
         self._first_inter_batch = None
         self.batch_cluster_update_fail = {}
@@ -62,6 +63,8 @@ class CreluManager:
             self._plot()
         if self.should_log():
             self.logger.after_train_iter()
+        if self.should_update_post_stats():
+            self._update_post_stats()
 
     def _plot(self):
         cluster_save_path = drelu_save_path = None
@@ -76,7 +79,7 @@ class CreluManager:
                             f'inter min {self.cur_min_inter:.2f}, '\
                             f'max {self.cur_max_inter:.2f}, '\
                             f'pref quantile {self.prefrence_quantile:.2f}'
-        plot_clustering(self.cur_cluster_res, H=self.H, W=self.W, 
+        plot_clustering(self.cur_cluster_details, H=self.H, W=self.W, 
                         save_path=cluster_save_path, title=title)
         plot_drelu(self.cur_mean_drelu_maps, 
                    save_path=drelu_save_path,
@@ -89,7 +92,8 @@ class CreluManager:
     def should_update_drelu_stats(self):
         batch_amount = self.update_config['drelu_stats']['batch_amount']
         for next_batch in range(self.batch_idx, self.batch_idx+batch_amount):
-            if self._should_update(self.update_config['cluster'], next_batch):
+            if self._should_update(self.update_config['cluster'], next_batch,
+                                   ignore_max_idx=True):
                 return True
         return False
         
@@ -102,16 +106,22 @@ class CreluManager:
     
     def should_update_clusters(self):
         return self._should_update(self.update_config['cluster'])
+    
+    def should_update_post_stats(self):
+        max_iters = self.update_config.get('max_iters')
+        after_max = self.batch_idx is not None and max_iters is not None and \
+            self.batch_idx >= max_iters
+        return after_max and self._should_update(self.update_config['cluster'], ignore_max_idx=True)
         
 
-    def _should_update(self, config, batch_idx=None):
+    def _should_update(self, config, batch_idx=None, ignore_max_idx=False):
         if batch_idx is None:
             batch_idx = self.batch_idx
         update_freq = config['update_freq']
         batch_after_warmup = batch_idx - self.update_config['warmup']
         max_iters = self.update_config.get('max_iters')
         if update_freq is None or batch_after_warmup < 0 or \
-          (max_iters is not None and batch_idx >= max_iters):
+          (max_iters is not None and batch_idx >= max_iters and not ignore_max_idx):
             return False
         elif batch_after_warmup == 0:
             return config['update_on_start']
@@ -130,17 +140,17 @@ class CreluManager:
         if not self.cluster_started:
             self.cluster_started = True
         for channel_idx in range(self.drelu_maps.shape[1]):
-            cluster_res = cluster_neurons(self.drelu_maps[:, channel_idx], 
-                                          preference_quantile=self.prefrence_quantile,
-                                          no_converge_fail=self.cluster_no_converge_fail)
-            self.cur_cluster_res[channel_idx] = cluster_res
-            if cluster_res['failed_to_converge']:
+            self.cur_cluster_details[channel_idx] = \
+                cluster_neurons(self.drelu_maps[:, channel_idx],
+                                prev_clusters=self.cur_cluster_details.get(channel_idx, {}).get('clusters'),
+                                preference_quantile=self.prefrence_quantile,
+                                no_converge_fail=self.cluster_no_converge_fail)
+            if self.cur_cluster_details[channel_idx]['failed_to_converge']:
                 print(f"Caught convergence warning at batch {self.batch_idx}, channel {channel_idx}\n"\
                         "not updating clusters")
                 cur_fails = self.batch_cluster_update_fail.get(self.batch_idx, [])
-                cur_fails.append(channel_idx) 
-                self.batch_cluster_update_fail[self.batch_idx] = cur_fails
-        prototype, active_channels = format_clusters(self.C, self.H, self.W, self.cur_cluster_res)
+                self.batch_cluster_update_fail[self.batch_idx] = cur_fails + [channel_idx]
+        prototype, active_channels = format_clusters(self.C, self.H, self.W, self.cur_cluster_details)
         crelu: ClusterRelu = get_layer(self.model, self.layer_name)
         crelu.prototype = prototype
         crelu.active_channels = active_channels
@@ -182,6 +192,16 @@ class CreluManager:
                 // inter_config['update_freq']
         update_step = 1 / max(update_amount, 1)
         return update_step
+    
+    def _update_post_stats(self):
+        for channel, cluster_details in self.cur_cluster_details.items():
+            if cluster_details['all_zero']:
+                continue
+            affinity_mat = get_affinity_mat(self.drelu_maps[:, channel])
+            cluster_details['same_label_affinity'], cluster_details['diff_label_affinity'] = \
+                get_mean_dist(cluster_details.get('clusters'), affinity_mat)
+
+
 
 
 def add_crelu_hooks(model, layer_names,
