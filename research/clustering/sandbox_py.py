@@ -40,6 +40,7 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
     cfg = Config.fromfile(config_path)
 
     cfg.data.samples_per_gpu = 256
+
     cfg.optimizer.lr *= 0.2**3
     cfg.load_from = ckpt
     # cfg.runner.max_epochs = 3
@@ -112,6 +113,7 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
             by_epoch=False,
         )
     )
+
     # torch.autograd.set_detect_anomaly(True)
 
     train_model(
@@ -135,6 +137,8 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
     cluster_update_freq = 20
     only_during_training = True
     cluster_no_converge_fail = True
+    layers_args = {"layer1_0_1": {"keep_channels": [47, 24, 9, 12, 29]}}
+    use_cluster_mean = True
 
     conf = {
         "max_iters": cfg.runner.max_iters - cooldown,
@@ -170,69 +174,70 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
     layers_for_hook = [
         "layer1_0_1",
     ]
-    output_dir = osp.join(cfg.work_dir, "crelu_res")
 
     hooks = add_crelu_hooks(
         model,
         layers_for_hook,
         update_config=conf,
-        output_dir=output_dir,
         cluster_no_converge_fail=cluster_no_converge_fail,
+        layers_args=layers_args,
+        use_cluster_mean=use_cluster_mean,
     )
     return hooks
 
 
-def test2(model, cfg):
-    # config_path = '/workspaces/secure_inference/research/configs/classification/resnet/resnet18_cifar100/baseline.py'
-    # cfg = Config.fromfile(config_path)
-    ckpt = "/workspaces/secure_inference/tests/resnet18_10_8/latest.pth"
-    checkpoint = load_checkpoint(model, ckpt, map_location="cpu")
-    default_args = dict(test_mode=False)
-    dataset = build_dataset(cfg.data.train, default_args=default_args)
+# def test2(model, cfg):
+#     # config_path = '/workspaces/secure_inference/research/configs/classification/resnet/resnet18_cifar100/baseline.py'
+#     # cfg = Config.fromfile(config_path)
+#     ckpt = "/workspaces/secure_inference/tests/resnet18_10_8/latest.pth"
+#     checkpoint = load_checkpoint(model, ckpt, map_location="cpu")
+#     default_args = dict(test_mode=False)
+#     dataset = build_dataset(cfg.data.train, default_args=default_args)
 
-    ################ loop loader_cfg
-    loader_cfg = dict(
-        # cfg.gpus will be ignored if distributed
-        num_gpus=1,
-        dist=False,
-        round_up=True,
-        shuffle=True,  # Not shuffle by default
-        sampler_cfg=None,  # Not use sampler by default
-        **cfg.data.get("train_dataloader", {}),
-    )
-    loader_cfg.update(
-        {
-            k: v
-            for k, v in cfg.data.items()
-            if k
-            not in [
-                "train",
-                "val",
-                "test",
-                "train_dataloader",
-                "val_dataloader",
-                "test_dataloader",
-            ]
-        }
-    )
-    if "distortion_extraction" in loader_cfg:
-        del loader_cfg["distortion_extraction"]
+#     ################ loop loader_cfg
+#     loader_cfg = dict(
+#         # cfg.gpus will be ignored if distributed
+#         num_gpus=1,
+#         dist=False,
+#         round_up=True,
+#         shuffle=True,  # Not shuffle by default
+#         sampler_cfg=None,  # Not use sampler by default
+#         **cfg.data.get("train_dataloader", {}),
+#     )
+#     loader_cfg.update(
+#         {
+#             k: v
+#             for k, v in cfg.data.items()
+#             if k
+#             not in [
+#                 "train",
+#                 "val",
+#                 "test",
+#                 "train_dataloader",
+#                 "val_dataloader",
+#                 "test_dataloader",
+#             ]
+#         }
+#     )
+#     if "distortion_extraction" in loader_cfg:
+#         del loader_cfg["distortion_extraction"]
 
-    loader_cfg["samples_per_gpu"] = 256
-    data_loader = build_dataloader(dataset, **loader_cfg)
-    for i, data in enumerate(data_loader):
-        if i % 4 == 0:
-            print(f"Processing batch {i}")
-        out = model.forward_test(data["img"])
-        if i + 1 >= 9:  # Stop after N examples
-            break
+#     loader_cfg["samples_per_gpu"] = 256
+#     data_loader = build_dataloader(dataset, **loader_cfg)
+#     for i, data in enumerate(data_loader):
+#         if i % 4 == 0:
+#             print(f"Processing batch {i}")
+#         out = model.forward_test(data["img"])
+#         if i + 1 >= 9:  # Stop after N examples
+#             break
 
 
 def main():
-    work_dir = "/workspaces/secure_inference/tests/2_11_single_layer_logger_debug"
+    work_dir = "/workspaces/secure_inference/tests/single_layer/3_11_mean"
     warmup = 12
-    cooldown = 300
+    cooldown = 100
     max_iters = warmup + cooldown + 200
+
     eval_interval = 15
     validate = True
     plot = True

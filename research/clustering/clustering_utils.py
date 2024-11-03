@@ -9,7 +9,10 @@ from sklearn.cluster import AffinityPropagation
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances
 
-from research.clustering.crelu_block import ClusterRelu, create_default_prototype
+from research.clustering.crelu_block import (
+    create_default_labels,
+    create_default_prototype,
+)
 
 
 class ClusterConvergenceException(Exception):
@@ -33,6 +36,23 @@ def get_affinity_mat(drelu_maps: np.ndarray) -> np.ndarray:
     return affinity_mat
 
 
+def get_default_cluster_details(
+    clusters: Optional[AffinityPropagation] = None,
+) -> dict:
+    details = dict(
+        clusters=clusters,
+        all_zero=False,
+        failed_to_converge=False,
+        same_label_affinity=0,
+        diff_label_affinity=0,
+    )
+    return details
+
+
+def _verify_keys(details):
+    assert set(details.keys()) == set(get_default_cluster_details().keys())
+
+
 def cluster_neurons(
     drelu_maps: np.ndarray,
     prev_clusters: AffinityPropagation,
@@ -40,15 +60,12 @@ def cluster_neurons(
     precompute_affinity: bool = True,
     preference_quantile: Optional[float] = None,
 ) -> Dict:
-    results = {
-        "clusters": prev_clusters,
-        "all_zero": False,
-        "failed_to_converge": False,
-    }
+    results = get_default_cluster_details(clusters=prev_clusters)
     if not torch.any(drelu_maps):
         results["all_zero"] = True
-        results["same_label_affinity"] = results["diff_label_affinity"] = 0
+        _verify_keys(results)
         return results
+
     assert not (
         not precompute_affinity and preference_quantile is not None
     ), "to get the prefrence you need to precomutpe the affinity matrix"
@@ -64,16 +81,21 @@ def cluster_neurons(
         input_type = "euclidean"
     with warnings.catch_warnings(record=True) as caught_warnings:
         clusters = AffinityPropagation(
-            random_state=42, affinity=input_type, preference=preference
+            random_state=42,
+            affinity=input_type,
+            preference=preference,
+            max_iter=300,
         ).fit(algo_input)
         for warning in caught_warnings:
             if warning.category == ConvergenceWarning and no_converge_fail:
                 results["failed_to_converge"] = True
+
     if not results["failed_to_converge"]:
         results["clusters"] = clusters
     results["same_label_affinity"], results["diff_label_affinity"] = get_mean_dist(
         results.get("clusters"), affinity_mat
     )
+    _verify_keys(results)
     return results
 
 
@@ -93,28 +115,34 @@ def format_clusters(
     W: int,
     channel_clusters: Dict[str, Dict] = {},
     all_clusters: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert not (
         all_clusters and any(c not in channel_clusters for c in range(C))
     ), "need to contain all channels if all clusters is passed"
     prototype = create_default_prototype(C=C, H=H, W=W)
+    labels = create_default_labels(C=C, H=H, W=W)
     active_channels = []
     for channel, cluster_details in channel_clusters.items():
         if not cluster_details["all_zero"]:
             active_channels.append(channel)
-        if cluster_details["all_zero"] or cluster_details["failed_to_converge"]:
-            continue
         clusters = cluster_details["clusters"]
+        if (
+            cluster_details["all_zero"]
+            or cluster_details["failed_to_converge"]
+            or (clusters is None)
+        ):
+            continue
         cluster_centers_indices = clusters.cluster_centers_indices_
-        labels = clusters.labels_.reshape(H, W)
+        channel_labels = clusters.labels_.reshape(H, W)
+        labels[channel] = torch.from_numpy(channel_labels)
         for label, cluster_idx in enumerate(cluster_centers_indices):
-            label_rows, label_cols = np.nonzero(labels == label)
+            label_rows, label_cols = np.nonzero(channel_labels == label)
             center_row = cluster_idx // W
             center_col = cluster_idx % W
             prototype[0, channel, label_rows, label_cols] = center_row
             prototype[1, channel, label_rows, label_cols] = center_col
     active_channels = torch.Tensor(sorted(active_channels))
-    return prototype, active_channels
+    return prototype, active_channels, labels
 
 
 def plot_drelu(
