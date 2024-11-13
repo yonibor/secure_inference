@@ -24,7 +24,7 @@ def format_cluster_samples(drelu_maps: np.ndarray) -> np.ndarray:
     if isinstance(drelu_maps, torch.Tensor):
         drelu_maps = drelu_maps.numpy()
     assert (
-        isinstance(drelu_maps, np.ndarray) and drelu_maps.ndim == 3
+        isinstance(drelu_maps, np.ndarray) and drelu_maps.ndim == 4
     ), "incorrect input format"
     samples = drelu_maps.reshape(drelu_maps.shape[0], -1).T
     return samples
@@ -36,16 +36,17 @@ def get_affinity_mat(drelu_maps: np.ndarray) -> np.ndarray:
     return affinity_mat
 
 
-def get_default_cluster_details(
-    clusters: Optional[AffinityPropagation] = None,
-) -> dict:
+def get_default_cluster_details(**kwargs) -> dict:
     details = dict(
-        clusters=clusters,
+        clusters=None,
+        channels=None,
+        id=id,
         all_zero=False,
         failed_to_converge=False,
         same_label_affinity=0,
         diff_label_affinity=0,
     )
+    details.update(kwargs)
     return details
 
 
@@ -55,12 +56,16 @@ def _verify_keys(details):
 
 def cluster_neurons(
     drelu_maps: np.ndarray,
-    prev_clusters: AffinityPropagation,
+    prev_cluster_details: dict,
     no_converge_fail: bool = True,
     precompute_affinity: bool = True,
     preference_quantile: Optional[float] = None,
 ) -> Dict:
-    results = get_default_cluster_details(clusters=prev_clusters)
+    results = get_default_cluster_details(
+        clusters=prev_cluster_details["clusters"],
+        id=prev_cluster_details["id"],
+        channels=prev_cluster_details["channels"],
+    )
     if not torch.any(drelu_maps):
         results["all_zero"] = True
         _verify_keys(results)
@@ -116,39 +121,45 @@ def format_clusters(
     C: int,
     H: int,
     W: int,
-    channel_clusters: Dict[str, Dict] = {},
+    clusters_details: Dict[str, Dict] = {},
     all_clusters: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    all_channels = np.concatenate([details["channels"] for details in clusters_details])
     assert not (
-        all_clusters and any(c not in channel_clusters for c in range(C))
+        all_clusters and set(all_channels) != set(range(C))
     ), "need to contain all channels if all clusters is passed"
     prototype = create_default_prototype(C=C, H=H, W=W)
     labels = create_default_labels(C=C, H=H, W=W)
-    crelu_channels, original_relu_channels = [], []
-    for channel, cluster_details in channel_clusters.items():
-        clusters = cluster_details["clusters"]
-        if not cluster_details["all_zero"]:
+    crelu_channels, original_relu_channels = np.array([]), np.array([])
+    for cur_details in clusters_details:
+        clusters = cur_details["clusters"]
+        channels: np.ndarray = cur_details["channels"]
+        if not cur_details["all_zero"]:
             if clusters is None:
-                original_relu_channels.append(channel)
+                original_relu_channels = np.concatenate(
+                    [original_relu_channels, channels]
+                )
             else:
-                crelu_channels.append(channel)
+                crelu_channels = np.concatenate([crelu_channels, channels])
         if (
-            cluster_details["all_zero"]
-            or cluster_details["failed_to_converge"]
+            cur_details["all_zero"]
+            or cur_details["failed_to_converge"]
             or (clusters is None)
         ):
             continue
         cluster_centers_indices = clusters.cluster_centers_indices_
-        channel_labels = clusters.labels_.reshape(H, W)
-        labels[channel] = torch.from_numpy(channel_labels)
+        cur_labels = clusters.labels_.reshape(channels.size, H, W)
+        labels[channels] = torch.from_numpy(cur_labels)
         for label, cluster_idx in enumerate(cluster_centers_indices):
-            label_rows, label_cols = np.nonzero(channel_labels == label)
-            center_row = cluster_idx // W
-            center_col = cluster_idx % W
-            prototype[0, channel, label_rows, label_cols] = center_row
-            prototype[1, channel, label_rows, label_cols] = center_col
-    crelu_channels = sorted(crelu_channels)
-    original_relu_channels = sorted(original_relu_channels)
+            label_channels, label_rows, label_cols = np.nonzero(cur_labels == label)
+            center_channel, center_row, center_col = np.unravel_index(
+                cluster_idx, cur_labels.shape
+            )
+            prototype[0, label_channels, label_rows, label_cols] = center_channel
+            prototype[1, label_channels, label_rows, label_cols] = center_row
+            prototype[2, label_channels, label_rows, label_cols] = center_col
+    crelu_channels = np.sort(crelu_channels)
+    original_relu_channels = np.sort(original_relu_channels)
     return prototype, crelu_channels, original_relu_channels, labels
 
 

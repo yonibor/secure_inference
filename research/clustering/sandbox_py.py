@@ -271,10 +271,11 @@ def main():
     #     - set(["layer2_0_1", "layer3_0_1", "layer4_0_1", "layer3_1_2"])
     # )
     # layers_for_hook=["layer1_0_1"],
-    layers = Params().LAYER_NAMES
+    # layers = Params().LAYER_NAMES
+    layers = ["layer4_0_1"]
 
     run_train(
-        work_dir="/workspaces/secure_inference/tests/12_11_hyper/full_iters50k",
+        work_dir="/workspaces/secure_inference/tests/12_11_multi_channel/debug",
         max_iters=warmup + cooldown + clustering_iters,
         validate=True,
         eval_interval=1000,

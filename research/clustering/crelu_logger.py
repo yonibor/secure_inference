@@ -1,6 +1,6 @@
 import csv
 import os
-from typing import Dict
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 from mmcv.runner.hooks.hook import HOOKS
@@ -13,6 +13,8 @@ CHANNEL_COLS = [
     "batch_index",
     "layer_name",
     "channel",
+    "id",
+    "channels",
     "all_zero",
     "failed_to_converge",
     "cluster_amount",
@@ -64,8 +66,8 @@ class CreluLogger(WandbLoggerHook):
     def _log_general(self, runner) -> None:
         tags = {}
         for layer_name, crelu in self.crelu_hooks.items():
-            channels_details = self._get_channels_details(crelu)
-            channels_summary = self._summarize_channels_details(channels_details)
+            groups_details = self._get_groups_details(crelu, return_per_channel=False)
+            channels_summary = self._summarize_groups_details(groups_details)
             layer_tags = dict(
                 batch_index=crelu.batch_idx,
                 min_inter=crelu.cur_min_inter,
@@ -78,15 +80,17 @@ class CreluLogger(WandbLoggerHook):
         tags.update(self._summarize_layers(tags))
         self._log_wandb(tags, runner)
 
-    def _get_channels_details(self, crelu: CreluManager) -> Dict[str, dict]:
-        res = {}
+    def _get_groups_details(
+        self, crelu: CreluManager, return_per_channel: bool
+    ) -> Union[Dict[str, dict], List[dict]]:
+        res = []
+        res_per_channel = {}
         channel_drelu_mean = crelu.cur_mean_drelu_maps.reshape(
             crelu.cur_mean_drelu_maps.shape[0], -1
         ).mean(axis=1)
-        for channel in range(crelu.C):
-            cluster_details = crelu.cur_cluster_details[channel]
-            clusters = cluster_details.get("clusters")
-            if cluster_details.get("all_zero", False):
+        for cluster_details in crelu.cur_cluster_details:
+            clusters = cluster_details["clusters"]
+            if cluster_details["all_zero"]:
                 cluster_amount = None
             elif clusters is None:
                 cluster_amount = crelu.H * crelu.W
@@ -98,21 +102,34 @@ class CreluLogger(WandbLoggerHook):
                 "failed_to_converge",
                 "same_label_affinity",
                 "diff_label_affinity",
+                "id",
+                "channels",
             ]
-            res[channel] = {
-                **{k: cluster_details[k] for k in copy_keys},
-                "cluster_amount": cluster_amount,
-                "drelu_mean": channel_drelu_mean[channel],
-            }
-        return res
+            for channel in cluster_details["channels"]:
+                cur_res = {
+                    **{k: cluster_details[k] for k in copy_keys},
+                    "cluster_amount": cluster_amount,
+                    "drelu_mean": channel_drelu_mean[channel],
+                }
+                res_per_channel[channel] = cur_res
+                res.append(cur_res)
+        if return_per_channel:
+            return res_per_channel
+        else:
+            return res
 
     @staticmethod
-    def _summarize_channels_details(channels_details: Dict) -> Dict[str, np.float32]:
+    def _summarize_groups_details(
+        groups_details: List[dict],
+    ) -> Dict[str, np.float32]:
         def _avg_key(k, allow_none=False):
-            values = [details[k] for details in channels_details.values()]
-            assert None not in values or allow_none
-            values_not_none = [v for v in values if v is not None]
-            mean = np.mean(np.array(values_not_none).astype(np.float32))
+            details_not_none = [
+                details for details in groups_details if details[k] is not None
+            ]
+            assert allow_none or len(details_not_none) == len(groups_details)
+            values = np.array([details[k] for details in details_not_none])
+            sizes = np.array([details["channels"].size for details in details_not_none])
+            mean = np.sum(values * sizes) / np.sum(sizes)
             return mean
 
         details = dict(
@@ -158,7 +175,9 @@ class CreluLogger(WandbLoggerHook):
                     and not crelu.should_update_post_stats()
                 ):
                     return
-                channels_details = self._get_channels_details(crelu)
+                channels_details = self._get_groups_details(
+                    crelu, return_per_channel=True
+                )
                 for channel, details in channels_details.items():
                     details.update(
                         {

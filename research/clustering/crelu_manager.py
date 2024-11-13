@@ -48,13 +48,13 @@ class CreluManager:
         self.batch_idx = None
         self.drelu_maps = self.prev_drelu_maps = None
         self.drelu_maps_counter = 0
-        self.cur_cluster_details = {
-            channel: get_default_cluster_details() for channel in range(self.C)
-        }
+        self.cur_cluster_details = [
+            get_default_cluster_details(channels=np.array([channel]), id=channel)
+            for channel in range(self.C)
+        ]
         self.cur_mean_drelu_maps = None
         self.cur_min_inter = self.cur_max_inter = None
         self._first_inter_batch = None
-        self.batch_cluster_update_fail = {}
         self.keep_channels = keep_channels if keep_channels is not None else []
 
         self._init_crelu()
@@ -152,16 +152,15 @@ class CreluManager:
             self.drelu_maps_counter <= self.update_config["drelu_stats"]["batch_amount"]
         )
 
-    def _get_channel_clusters(self, channel: int) -> None:
-        results = {}
-        prev_clusters = self.cur_cluster_details[channel]["clusters"]
+    def _get_single_group_clusters(self, prev_cluster_details: dict) -> None:
         finished_clustering = (
-            prev_clusters is not None and self.update_config["cluster"]["cluster_once"]
+            prev_cluster_details["clusters"] is not None
+            and self.update_config["cluster"]["cluster_once"]
         )
-        if channel not in self.keep_channels and not finished_clustering:
-            results[channel] = cluster_neurons(
-                self.drelu_maps[:, channel],
-                prev_clusters=prev_clusters,
+        if not finished_clustering:
+            prev_cluster_details = cluster_neurons(
+                self.drelu_maps[:, prev_cluster_details["channels"]],
+                prev_cluster_details=prev_cluster_details,
                 preference_quantile=self.prefrence_quantile,
                 no_converge_fail=self.cluster_no_converge_fail,
             )
@@ -173,17 +172,13 @@ class CreluManager:
             #     no_converge_fail=self.cluster_no_converge_fail,
             # )
 
-            if self.cur_cluster_details[channel]["failed_to_converge"]:
+            if prev_cluster_details["failed_to_converge"]:
                 print(
                     f"Caught convergence warning at batch {self.batch_idx} ",
-                    f"layer {self.layer_name}, channel {channel}\n",
+                    f"layer {self.layer_name}, id {prev_cluster_details['id']}\n",
                     "not updating clusters",
                 )
-                prev_fails = self.batch_cluster_update_fail.get(self.batch_idx, [])
-                cur_fails = prev_fails + [channel]
-                self.batch_cluster_update_fail[self.batch_idx] = cur_fails
-
-        return results
+        return prev_cluster_details
 
     def _reset_drelu_maps(self) -> None:
         if self.drelu_maps is not None:
@@ -210,7 +205,6 @@ class CreluManager:
             # )
             # np.save(out_path, self.drelu_maps)
 
-        channels = list(range(self.drelu_maps.shape[1]))
         from datetime import datetime
 
         start_time = datetime.now()
@@ -222,13 +216,12 @@ class CreluManager:
         #     # Map function_b to items in array concurrently
         #     channels_details = list(executor.map(self._get_channel_clusters, channels))
 
-        channels_details = []
-        for channel in channels:
-            channels_details.append(self._get_channel_clusters(channel))
+        new_clusters = []
+        for cluster_details in self.cur_cluster_details:
+            new_clusters.append(self._get_single_group_clusters(cluster_details))
 
         print(f"end clustering {datetime.now() - start_time}")
-        for details in channels_details:
-            self.cur_cluster_details.update(details)
+        self.cur_cluster_details = new_clusters
 
         prototype, crelu_channels, original_relu_channels, labels = format_clusters(
             self.C, self.H, self.W, self.cur_cluster_details

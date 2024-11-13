@@ -19,7 +19,7 @@ class ClusterRelu(nn.Module):
         super(ClusterRelu, self).__init__()
         self.C, self.H, self.W = C, H, W
         self.use_cluster_mean = use_cluster_mean
-        self.register_buffer("_prototype", self._format_labels(prototype))
+        self.register_buffer("_prototype", self._format_prototype(prototype))
         self.register_buffer("_inter", self._format_inter(inter))
         self.register_buffer(
             "_crelu_channels", self._format_channels(torch.arange(self.C))
@@ -137,10 +137,14 @@ class ClusterRelu(nn.Module):
     def _get_cluster_examplar(self, x: torch.Tensor) -> torch.Tensor:
         # Extract row and col indices from prototype
         active_prototype = self.prototype[:, self.crelu_channels]
-        rows, cols = active_prototype[0], active_prototype[1]
+        channels, rows, cols = (
+            active_prototype[0],
+            active_prototype[1],
+            active_prototype[2],
+        )
 
         # Gather prototype values using ellipsis indexing
-        prototype_x = x[:, self.channel_indices[self.crelu_channels], rows, cols]
+        prototype_x = x[:, channels, rows, cols]
         return prototype_x
 
     @property
@@ -249,8 +253,10 @@ class ClusterRelu(nn.Module):
 
 
 def create_default_prototype(C: int, H: int, W: int) -> torch.Tensor:
-    prototype = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
-    prototype = torch.stack(prototype, dim=0).unsqueeze(1).repeat(1, C, 1, 1)
+    prototype = torch.meshgrid(
+        torch.arange(C), torch.arange(H), torch.arange(W), indexing="ij"
+    )
+    prototype = torch.stack(prototype, dim=0)
     return prototype
 
 
