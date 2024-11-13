@@ -1,11 +1,12 @@
+import concurrent.futures
 import os
+from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 from torch import nn
 
-from model_handling import get_layer, set_layer
 from research.clustering.clustering_utils import (
     cluster_neurons,
     format_clusters,
@@ -14,6 +15,7 @@ from research.clustering.clustering_utils import (
     get_mean_dist,
 )
 from research.clustering.crelu_block import ClusterRelu
+from research.clustering.model_handling import get_layer, set_layer
 from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar100 import (
     Params as resnet18_8xb16_cifar100_Params,
 )
@@ -44,7 +46,8 @@ class CreluManager:
         ]
 
         self.batch_idx = None
-        self.drelu_maps = self.prev_drelu_maps = None  # TODO: remove yoni (why?)
+        self.drelu_maps = self.prev_drelu_maps = None
+        self.drelu_maps_counter = 0
         self.cur_cluster_details = {
             channel: get_default_cluster_details() for channel in range(self.C)
         }
@@ -144,29 +147,49 @@ class CreluManager:
         else:
             self.drelu_maps = torch.concat([self.drelu_maps, cur_drelu_map], dim=0)
         self.cur_mean_drelu_maps = torch.mean(self.drelu_maps.float(), axis=0).numpy()
+        self.drelu_maps_counter += 1
+        assert (
+            self.drelu_maps_counter <= self.update_config["drelu_stats"]["batch_amount"]
+        )
 
-    def _update_channel_clusters(self, channel: int) -> None:
-        if channel not in self.keep_channels:
-            self.cur_cluster_details[channel] = cluster_neurons(
+    def _get_channel_clusters(self, channel: int) -> None:
+        results = {}
+        prev_clusters = self.cur_cluster_details[channel]["clusters"]
+        finished_clustering = (
+            prev_clusters is not None and self.update_config["cluster"]["cluster_once"]
+        )
+        if channel not in self.keep_channels and not finished_clustering:
+            results[channel] = cluster_neurons(
                 self.drelu_maps[:, channel],
-                prev_clusters=self.cur_cluster_details[channel]["clusters"],
+                prev_clusters=prev_clusters,
                 preference_quantile=self.prefrence_quantile,
                 no_converge_fail=self.cluster_no_converge_fail,
             )
 
-        if self.cur_cluster_details[channel]["failed_to_converge"]:
-            print(
-                f"Caught convergence warning at batch {self.batch_idx}, channel {channel}\n"
-                "not updating clusters"
-            )
-            prev_fails = self.batch_cluster_update_fail.get(self.batch_idx, [])
-            cur_fails = prev_fails + [channel]
-            self.batch_cluster_update_fail[self.batch_idx] = cur_fails
+            # self.cur_cluster_details[channel] = cluster_neurons(
+            #     self.drelu_maps[:, channel],
+            #     prev_clusters=self.cur_cluster_details[channel]["clusters"],
+            #     preference_quantile=self.prefrence_quantile,
+            #     no_converge_fail=self.cluster_no_converge_fail,
+            # )
+
+            if self.cur_cluster_details[channel]["failed_to_converge"]:
+                print(
+                    f"Caught convergence warning at batch {self.batch_idx} ",
+                    f"layer {self.layer_name}, channel {channel}\n",
+                    "not updating clusters",
+                )
+                prev_fails = self.batch_cluster_update_fail.get(self.batch_idx, [])
+                cur_fails = prev_fails + [channel]
+                self.batch_cluster_update_fail[self.batch_idx] = cur_fails
+
+        return results
 
     def _reset_drelu_maps(self) -> None:
         if self.drelu_maps is not None:
             self.prev_drelu_maps = self.drelu_maps
             self.drelu_maps = None
+            self.drelu_maps_counter = 0
 
     def _update_prefrence_quantile(self) -> None:
         if self.prefrence_quantile is not None:
@@ -179,17 +202,42 @@ class CreluManager:
     def _update_clusters(self) -> None:
         if not self.cluster_started:
             self.cluster_started = True
+            # # TODO yoni: remove tmp
+            # print(f"saving path for {self.layer_name}")
+            # out_path = os.path.join(
+            #     "/workspaces/secure_inference/tests/12_11_multi_channel/all_stats",
+            #     f"{self.layer_name}.npy",
+            # )
+            # np.save(out_path, self.drelu_maps)
 
-        for channel in range(self.drelu_maps.shape[1]):
-            self._update_channel_clusters(channel)
+        channels = list(range(self.drelu_maps.shape[1]))
+        from datetime import datetime
 
-        prototype, active_channels, labels = format_clusters(
+        start_time = datetime.now()
+        print(f"start clustering {self.layer_name}")
+
+        # with concurrent.futures.ThreadPoolExecutor(
+        #     max_workers=os.cpu_count()
+        # ) as executor:
+        #     # Map function_b to items in array concurrently
+        #     channels_details = list(executor.map(self._get_channel_clusters, channels))
+
+        channels_details = []
+        for channel in channels:
+            channels_details.append(self._get_channel_clusters(channel))
+
+        print(f"end clustering {datetime.now() - start_time}")
+        for details in channels_details:
+            self.cur_cluster_details.update(details)
+
+        prototype, crelu_channels, original_relu_channels, labels = format_clusters(
             self.C, self.H, self.W, self.cur_cluster_details
         )
         crelu: ClusterRelu = get_layer(self.model, self.layer_name)
         crelu.prototype = prototype
         crelu.labels = labels
-        crelu.active_channels = active_channels
+        crelu.crelu_channels = crelu_channels
+        crelu.original_relu_channels = original_relu_channels
 
         self._update_prefrence_quantile()
         self._reset_drelu_maps()
@@ -213,6 +261,8 @@ class CreluManager:
             inter=inter,
             use_cluster_mean=self.use_cluster_mean,
         )
+        crelu.original_relu_channels = torch.arange(self.C)
+        crelu.crelu_channels = None
         set_layer(self.model, self.layer_name, crelu)
         self._update_inter_stats(crelu)
 

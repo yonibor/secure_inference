@@ -100,12 +100,15 @@ def cluster_neurons(
 
 
 def get_mean_dist(clusters: AffinityPropagation, affinity_mat: np.ndarray):
+    same_label_affinity, diff_label_affinity = None, None
     if clusters is None:
-        return None, None
+        return same_label_affinity, diff_label_affinity
     labels = clusters.labels_
     same_label_mask = labels[:, None] == labels[None, :]
-    same_label_affinity = affinity_mat[same_label_mask].mean()
-    diff_label_affinity = affinity_mat[~same_label_mask].mean()
+    if same_label_mask.any():
+        same_label_affinity = affinity_mat[same_label_mask].mean()
+    if not same_label_mask.all():
+        diff_label_affinity = affinity_mat[~same_label_mask].mean()
     return same_label_affinity, diff_label_affinity
 
 
@@ -121,11 +124,14 @@ def format_clusters(
     ), "need to contain all channels if all clusters is passed"
     prototype = create_default_prototype(C=C, H=H, W=W)
     labels = create_default_labels(C=C, H=H, W=W)
-    active_channels = []
+    crelu_channels, original_relu_channels = [], []
     for channel, cluster_details in channel_clusters.items():
-        if not cluster_details["all_zero"]:
-            active_channels.append(channel)
         clusters = cluster_details["clusters"]
+        if not cluster_details["all_zero"]:
+            if clusters is None:
+                original_relu_channels.append(channel)
+            else:
+                crelu_channels.append(channel)
         if (
             cluster_details["all_zero"]
             or cluster_details["failed_to_converge"]
@@ -141,8 +147,9 @@ def format_clusters(
             center_col = cluster_idx % W
             prototype[0, channel, label_rows, label_cols] = center_row
             prototype[1, channel, label_rows, label_cols] = center_col
-    active_channels = torch.Tensor(sorted(active_channels))
-    return prototype, active_channels, labels
+    crelu_channels = sorted(crelu_channels)
+    original_relu_channels = sorted(original_relu_channels)
+    return prototype, crelu_channels, original_relu_channels, labels
 
 
 def plot_drelu(

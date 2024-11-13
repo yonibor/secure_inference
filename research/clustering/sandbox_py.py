@@ -25,10 +25,15 @@ from mmcv.runner import get_dist_info, init_dist, load_checkpoint
 import wandb
 from research.clustering.crelu_logger import CreluLogger
 from research.clustering.crelu_manager import add_crelu_hooks
+from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar100 import (
+    Params,
+)
 from research.mmlab_extension.classification.resnet_cifar_v2 import ResNet_CIFAR_V2
 
 
-def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, plot):
+def run_train(
+    work_dir, max_iters, validate, eval_interval, plot, batch_size, hooks_kwargs
+):
     wandb.login(key="8b56dc84c3fadaca2c8e6bd08ad7fc57d24c2225")
 
     config_path = "/workspaces/secure_inference/research/configs/classification/resnet/resnet18_cifar100/baseline.py"
@@ -39,7 +44,9 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
 
     cfg = Config.fromfile(config_path)
 
-    cfg.data.samples_per_gpu = 256
+    cfg.data.samples_per_gpu = batch_size
+    cfg.data.workers_per_gpu = 0
+    cfg.data.persistent_workers = False
 
     cfg.optimizer.lr *= 0.2**3
     cfg.load_from = ckpt
@@ -52,6 +59,7 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
     cfg.workflow[0] = ("train", 5)
     cfg.workflow[1] = ("val", 0)
     cfg.evaluation = dict(interval=eval_interval, by_epoch=False)
+    cfg.checkpoint_config["interval"] = 10000
 
     cfg.gpu_ids = range(1)
     cfg.work_dir = work_dir
@@ -100,15 +108,21 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
     if "distortion_extraction" in cfg.data:
         del cfg.data["distortion_extraction"]
 
-    hooks = _add_crelu_hooks(model, cfg, warmup, cooldown)
+    hooks = _add_crelu_hooks(model, cfg, **hooks_kwargs)
     folder_name = os.path.basename(work_dir.rstrip("/"))
+    parent_folder_name = os.path.normpath(work_dir).split(os.sep)[-2]
     cfg.log_config.hooks.append(
         dict(
             type="CreluLogger",
             output_dir=work_dir,
             crelu_hooks=hooks,
             plot=plot,
-            init_kwargs={"project": "private_inference", "name": folder_name},
+            init_kwargs={
+                "project": "private_inference",
+                "name": folder_name,
+                "group": parent_folder_name,
+                # "mode": "disabled",  # TODO yoni: remove
+            },
             interval=10,
             by_epoch=False,
         )
@@ -132,13 +146,22 @@ def run_train(work_dir, max_iters, warmup, cooldown, validate, eval_interval, pl
     # test2(model, cfg)
 
 
-def _add_crelu_hooks(model, cfg, warmup, cooldown):
-    update_on_start = False
-    cluster_update_freq = 20
+def _add_crelu_hooks(
+    model,
+    cfg,
+    warmup,
+    cooldown,
+    layers_for_hook,
+    cluster_update_freq,
+    drelu_stats_batch_amount,
+    cluster_once,
+):
+    update_on_start = True
     only_during_training = True
     cluster_no_converge_fail = True
-    layers_args = {"layer1_0_1": {"keep_channels": [47, 24, 9, 12, 29]}}
-    use_cluster_mean = True
+    # layers_args = {"layer1_0_1": {"keep_channels": [47, 24, 9, 12, 29]}}
+    layers_args = {}
+    use_cluster_mean = False
 
     conf = {
         "max_iters": cfg.runner.max_iters - cooldown,
@@ -147,6 +170,7 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
         "cluster": {
             "update_freq": cluster_update_freq,
             "update_on_start": update_on_start,
+            "cluster_once": cluster_once,
             "preference": {
                 "quantile_start": 0.5,
                 "quantile_decay": 1,
@@ -163,7 +187,7 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
             "await_cluster_start": True,
         },
         "drelu_stats": {
-            "batch_amount": 4,
+            "batch_amount": drelu_stats_batch_amount,
         },
         "plot": {
             "update_freq": cluster_update_freq,
@@ -171,9 +195,11 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
         },
     }
 
-    layers_for_hook = [
-        "layer1_0_1",
-    ]
+    # layers_for_hook = [
+    #     # "layer1_0_1",
+    #     "layer1_0_2",
+    # ]
+    # layers_for_hook = Params().LAYER_NAMES
 
     hooks = add_crelu_hooks(
         model,
@@ -231,25 +257,38 @@ def _add_crelu_hooks(model, cfg, warmup, cooldown):
 #         if i + 1 >= 9:  # Stop after N examples
 #             break
 
+# from memory_profiler import profile
 
+
+# @profile
 def main():
-    work_dir = "/workspaces/secure_inference/tests/single_layer/3_11_mean"
-    warmup = 12
-    cooldown = 100
-    max_iters = warmup + cooldown + 200
+    warmup = 20
+    cooldown = 15000
+    clustering_iters = 50000
 
-    eval_interval = 15
-    validate = True
-    plot = True
+    # layers = list(
+    #     set(Params().LAYER_NAMES)
+    #     - set(["layer2_0_1", "layer3_0_1", "layer4_0_1", "layer3_1_2"])
+    # )
+    # layers_for_hook=["layer1_0_1"],
+    layers = Params().LAYER_NAMES
 
     run_train(
-        work_dir,
-        max_iters=max_iters,
-        warmup=warmup,
-        cooldown=cooldown,
-        validate=validate,
-        eval_interval=eval_interval,
-        plot=plot,
+        work_dir="/workspaces/secure_inference/tests/12_11_hyper/full_iters50k",
+        max_iters=warmup + cooldown + clustering_iters,
+        validate=True,
+        eval_interval=1000,
+        plot=False,
+        # layer_names=Params().LAYER_NAMES,
+        hooks_kwargs=dict(
+            layers_for_hook=layers,
+            cluster_update_freq=2500,
+            warmup=warmup,
+            cooldown=cooldown,
+            drelu_stats_batch_amount=8,
+            cluster_once=False,
+        ),
+        batch_size=128,
     )
 
 

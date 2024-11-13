@@ -9,6 +9,9 @@
 		"ms-python.python",
 		"ms-toolsai.jupyter",
 		"ms-python.black-formatter",
-		"ms-python.isort"
+		"ms-python.isort",
+		"tomoki1207.pdf",
+		"mutantdino.resourcemonitor",
+		"ms-azuretools.vscode-docker"
 	]
 }
