@@ -1,11 +1,11 @@
 import copy
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from sklearn.cluster import AffinityPropagation
+from sklearn.cluster import AffinityPropagation, KMeans
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances
 
@@ -20,7 +20,7 @@ class ClusterConvergenceException(Exception):
         super().__init__(message)
 
 
-def format_cluster_samples(drelu_maps: np.ndarray) -> np.ndarray:
+def format_cluster_samples(drelu_maps: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
     if isinstance(drelu_maps, torch.Tensor):
         drelu_maps = drelu_maps.numpy()
     assert (
@@ -45,6 +45,7 @@ def get_default_cluster_details(**kwargs) -> dict:
         failed_to_converge=False,
         same_label_affinity=0,
         diff_label_affinity=0,
+        prototype_affinity=0,
     )
     details.update(kwargs)
     return details
@@ -66,7 +67,7 @@ def cluster_neurons(
         id=prev_cluster_details["id"],
         channels=prev_cluster_details["channels"],
     )
-    if not torch.any(drelu_maps):
+    if not np.any(drelu_maps):
         results["all_zero"] = True
         _verify_keys(results)
         return results
@@ -97,24 +98,28 @@ def cluster_neurons(
 
     if not results["failed_to_converge"]:
         results["clusters"] = clusters
-    results["same_label_affinity"], results["diff_label_affinity"] = get_mean_dist(
-        results.get("clusters"), affinity_mat
-    )
+    (
+        results["same_label_affinity"],
+        results["diff_label_affinity"],
+        results["prototype_affinity"],
+    ) = get_mean_dist(results.get("clusters"), affinity_mat)
     _verify_keys(results)
     return results
 
 
 def get_mean_dist(clusters: AffinityPropagation, affinity_mat: np.ndarray):
-    same_label_affinity, diff_label_affinity = None, None
+    same_label_affinity = diff_label_affinity = prototype_affinity = None
     if clusters is None:
-        return same_label_affinity, diff_label_affinity
+        return same_label_affinity, diff_label_affinity, prototype_affinity
     labels = clusters.labels_
     same_label_mask = labels[:, None] == labels[None, :]
     if same_label_mask.any():
         same_label_affinity = affinity_mat[same_label_mask].mean()
     if not same_label_mask.all():
         diff_label_affinity = affinity_mat[~same_label_mask].mean()
-    return same_label_affinity, diff_label_affinity
+    prototype_indices = clusters.cluster_centers_indices_[labels]
+    prototype_affinity = affinity_mat[np.arange(len(labels)), prototype_indices].mean()
+    return same_label_affinity, diff_label_affinity, prototype_affinity
 
 
 def format_clusters(
@@ -151,16 +156,32 @@ def format_clusters(
         cur_labels = clusters.labels_.reshape(channels.size, H, W)
         labels[channels] = torch.from_numpy(cur_labels)
         for label, cluster_idx in enumerate(cluster_centers_indices):
-            label_channels, label_rows, label_cols = np.nonzero(cur_labels == label)
-            center_channel, center_row, center_col = np.unravel_index(
+            label_local_channels, label_rows, label_cols = np.nonzero(
+                cur_labels == label
+            )
+            label_channels = channels[label_local_channels]
+            center_local_channel, center_row, center_col = np.unravel_index(
                 cluster_idx, cur_labels.shape
             )
+            center_channel = channels[center_local_channel]
             prototype[0, label_channels, label_rows, label_cols] = center_channel
             prototype[1, label_channels, label_rows, label_cols] = center_row
             prototype[2, label_channels, label_rows, label_cols] = center_col
     crelu_channels = np.sort(crelu_channels)
     original_relu_channels = np.sort(original_relu_channels)
     return prototype, crelu_channels, original_relu_channels, labels
+
+
+def cluster_channels_kmeans(drelu_maps: np.ndarray, k: int):
+    examples = drelu_maps.transpose(1, 0, 2, 3)  # shape channel, batch, height, width
+    examples = examples.reshape(examples.shape[0], -1).astype(np.float32)
+    clusters = KMeans(n_clusters=k).fit(examples)
+
+    channels = [
+        np.nonzero(clusters.labels_ == label)[0]
+        for label in np.unique(clusters.labels_)
+    ]
+    return channels
 
 
 def plot_drelu(

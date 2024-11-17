@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from research.clustering.clustering_utils import (
+    cluster_channels_kmeans,
     cluster_neurons,
     format_clusters,
     get_affinity_mat,
@@ -33,6 +34,7 @@ class CreluManager:
         cluster_no_converge_fail: bool = True,
         keep_channels: List[int] = None,
         use_cluster_mean: bool = False,
+        group_channels_config: bool = False,
     ) -> None:
         self.model = model
         self.layer_name = layer_name
@@ -40,6 +42,7 @@ class CreluManager:
         self.C, self.H, self.W = C, H, W
         self.cluster_no_converge_fail = cluster_no_converge_fail
         self.use_cluster_mean = use_cluster_mean
+        self.group_channels_config = group_channels_config
 
         self.prefrence_quantile = self.update_config["cluster"]["preference"][
             "quantile_start"
@@ -141,12 +144,12 @@ class CreluManager:
         return batch_after_warmup % config["update_freq"] == 0
 
     def _update_drelu_maps(self, input: torch.Tensor) -> None:
-        cur_drelu_map = input[0].gt(0).cpu().detach()
+        cur_drelu_map = input[0].gt(0).cpu().detach().numpy()
         if self.drelu_maps is None:
             self.drelu_maps = cur_drelu_map
         else:
-            self.drelu_maps = torch.concat([self.drelu_maps, cur_drelu_map], dim=0)
-        self.cur_mean_drelu_maps = torch.mean(self.drelu_maps.float(), axis=0).numpy()
+            self.drelu_maps = np.concatenate([self.drelu_maps, cur_drelu_map], axis=0)
+        self.cur_mean_drelu_maps = np.mean(self.drelu_maps, axis=0)
         self.drelu_maps_counter += 1
         assert (
             self.drelu_maps_counter <= self.update_config["drelu_stats"]["batch_amount"]
@@ -194,16 +197,40 @@ class CreluManager:
                 pref_config["quantile_min"],
             )
 
+    def _create_grouped_clusters_templates(self):
+        config = self.group_channels_config
+        cluster_once = (
+            self.cluster_started or self.update_config["cluster"]["cluster_once"]
+        )
+        if not config["group"] or (cluster_once and self.cluster_started):
+            return
+        print("creating group templates")
+        groups_channels = []
+        self.cur_cluster_details = []
+        zero_channels_mask = np.logical_not(self.drelu_maps).all(axis=(0, 2, 3))
+        zero_channels = np.nonzero(zero_channels_mask)[0]
+        groups_channels.append(zero_channels)
+        remaining_channels = np.nonzero(np.logical_not(zero_channels_mask))[0]
+        if not config["group_by_kmeans"]:
+            groups_channels.append(remaining_channels)
+        else:
+            remaining_drelu = self.drelu_maps[:, remaining_channels]
+            kmeans_local_channels = cluster_channels_kmeans(
+                remaining_drelu, config["k"]
+            )
+            kmeans_channels = [
+                remaining_channels[channels] for channels in kmeans_local_channels
+            ]
+            groups_channels.extend(kmeans_channels)
+        for channels in groups_channels:
+            if channels.size > 0:
+                details = get_default_cluster_details(
+                    channels=channels, id=len(self.cur_cluster_details)
+                )
+                self.cur_cluster_details.append(details)
+
     def _update_clusters(self) -> None:
-        if not self.cluster_started:
-            self.cluster_started = True
-            # # TODO yoni: remove tmp
-            # print(f"saving path for {self.layer_name}")
-            # out_path = os.path.join(
-            #     "/workspaces/secure_inference/tests/12_11_multi_channel/all_stats",
-            #     f"{self.layer_name}.npy",
-            # )
-            # np.save(out_path, self.drelu_maps)
+        self._create_grouped_clusters_templates()
 
         from datetime import datetime
 
@@ -231,6 +258,16 @@ class CreluManager:
         crelu.labels = labels
         crelu.crelu_channels = crelu_channels
         crelu.original_relu_channels = original_relu_channels
+
+        if not self.cluster_started:
+            self.cluster_started = True
+            # # TODO yoni: remove tmp
+            # print(f"saving path for {self.layer_name}")
+            # out_path = os.path.join(
+            #     "/workspaces/secure_inference/tests/12_11_multi_channel/all_stats",
+            #     f"{self.layer_name}.npy",
+            # )
+            # np.save(out_path, self.drelu_maps)
 
         self._update_prefrence_quantile()
         self._reset_drelu_maps()
@@ -275,13 +312,16 @@ class CreluManager:
         return update_step
 
     def _update_post_stats(self) -> None:
-        for channel, cluster_details in self.cur_cluster_details.items():
+        for cluster_details in self.cur_cluster_details:
             if cluster_details["all_zero"]:
                 continue
-            affinity_mat = get_affinity_mat(self.drelu_maps[:, channel])
+            affinity_mat = get_affinity_mat(
+                self.drelu_maps[:, cluster_details["channels"]]
+            )
             (
                 cluster_details["same_label_affinity"],
                 cluster_details["diff_label_affinity"],
+                cluster_details["prototype_affinity"],
             ) = get_mean_dist(cluster_details.get("clusters"), affinity_mat)
         self._reset_drelu_maps()
 

@@ -20,6 +20,7 @@ CHANNEL_COLS = [
     "cluster_amount",
     "same_label_affinity",
     "diff_label_affinity",
+    "prototype_affinity",
     "drelu_mean",
 ]
 
@@ -93,7 +94,7 @@ class CreluLogger(WandbLoggerHook):
             if cluster_details["all_zero"]:
                 cluster_amount = None
             elif clusters is None:
-                cluster_amount = crelu.H * crelu.W
+                cluster_amount = crelu.H * crelu.W * cluster_details["channels"].size
             else:
                 cluster_amount = len(clusters.cluster_centers_indices_)
 
@@ -102,17 +103,19 @@ class CreluLogger(WandbLoggerHook):
                 "failed_to_converge",
                 "same_label_affinity",
                 "diff_label_affinity",
+                "prototype_affinity",
                 "id",
                 "channels",
             ]
+            cur_res = {
+                **{k: cluster_details[k] for k in copy_keys},
+                "cluster_amount": cluster_amount,
+            }
+            res.append(cur_res)
             for channel in cluster_details["channels"]:
-                cur_res = {
-                    **{k: cluster_details[k] for k in copy_keys},
-                    "cluster_amount": cluster_amount,
-                    "drelu_mean": channel_drelu_mean[channel],
-                }
-                res_per_channel[channel] = cur_res
-                res.append(cur_res)
+                channel_res = cur_res.copy()
+                channel_res["drelu_mean"] = channel_drelu_mean[channel]
+                res_per_channel[channel] = channel_res
         if return_per_channel:
             return res_per_channel
         else:
@@ -122,20 +125,25 @@ class CreluLogger(WandbLoggerHook):
     def _summarize_groups_details(
         groups_details: List[dict],
     ) -> Dict[str, np.float32]:
-        def _avg_key(k, allow_none=False):
+        def _agg_key(k, mean, allow_none=False):
             details_not_none = [
                 details for details in groups_details if details[k] is not None
             ]
             assert allow_none or len(details_not_none) == len(groups_details)
-            values = np.array([details[k] for details in details_not_none])
-            sizes = np.array([details["channels"].size for details in details_not_none])
-            mean = np.sum(values * sizes) / np.sum(sizes)
-            return mean
+            results = np.array([details[k] for details in details_not_none])
+            if mean:
+                sizes = np.array(
+                    [details["channels"].size for details in details_not_none]
+                )
+                results = np.sum(results * sizes) / np.sum(sizes)
+            else:
+                results = results.sum()
+            return results
 
         details = dict(
-            all_zero_ratio=_avg_key("all_zero"),
-            failed_ratio=_avg_key("failed_to_converge"),
-            cluster_amount_mean=_avg_key("cluster_amount", allow_none=True),
+            all_zero_ratio=_agg_key("all_zero", mean=True),
+            failed_ratio=_agg_key("failed_to_converge", mean=True),
+            cluster_amount_mean=_agg_key("cluster_amount", mean=False, allow_none=True),
         )
         return details
 
@@ -145,9 +153,8 @@ class CreluLogger(WandbLoggerHook):
 
         for layer_name, crelu in self.crelu_hooks.items():
             original_drelu_amount += crelu.C * crelu.W * crelu.H
-            cluster_mean_amount = tags[f"{layer_name}/cluster_amount_mean"]
             all_zero_ratio = tags[f"{layer_name}/all_zero_ratio"]
-            cur_drelu_amount += crelu.C * (1 - all_zero_ratio) * cluster_mean_amount
+            cur_drelu_amount += tags[f"{layer_name}/cluster_amount_mean"]
             channel_amount += crelu.C
             all_zero_amount += all_zero_ratio * crelu.C
             fail_amount += tags[f"{layer_name}/failed_ratio"] * crelu.C

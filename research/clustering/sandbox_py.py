@@ -59,7 +59,7 @@ def run_train(
     cfg.workflow[0] = ("train", 5)
     cfg.workflow[1] = ("val", 0)
     cfg.evaluation = dict(interval=eval_interval, by_epoch=False)
-    cfg.checkpoint_config["interval"] = 10000
+    cfg.checkpoint_config["interval"] = 1e6
 
     cfg.gpu_ids = range(1)
     cfg.work_dir = work_dir
@@ -121,7 +121,12 @@ def run_train(
                 "project": "private_inference",
                 "name": folder_name,
                 "group": parent_folder_name,
-                # "mode": "disabled",  # TODO yoni: remove
+                "config": {
+                    **hooks_kwargs,
+                    "lr": cfg.optimizer.lr,
+                    "max_iters": max_iters,
+                    "batch_size": batch_size,
+                },
             },
             interval=10,
             by_epoch=False,
@@ -155,6 +160,8 @@ def _add_crelu_hooks(
     cluster_update_freq,
     drelu_stats_batch_amount,
     cluster_once,
+    group_channels_config,
+    preference_start,
 ):
     update_on_start = True
     only_during_training = True
@@ -172,7 +179,7 @@ def _add_crelu_hooks(
             "update_on_start": update_on_start,
             "cluster_once": cluster_once,
             "preference": {
-                "quantile_start": 0.5,
+                "quantile_start": preference_start,
                 "quantile_decay": 1,
                 "quantile_min": 0.1,
             },
@@ -208,6 +215,7 @@ def _add_crelu_hooks(
         cluster_no_converge_fail=cluster_no_converge_fail,
         layers_args=layers_args,
         use_cluster_mean=use_cluster_mean,
+        group_channels_config=group_channels_config,
     )
     return hooks
 
@@ -263,8 +271,8 @@ def _add_crelu_hooks(
 # @profile
 def main():
     warmup = 20
-    cooldown = 15000
-    clustering_iters = 50000
+    cooldown = 1000
+    clustering_iters = 1000
 
     # layers = list(
     #     set(Params().LAYER_NAMES)
@@ -272,22 +280,31 @@ def main():
     # )
     # layers_for_hook=["layer1_0_1"],
     # layers = Params().LAYER_NAMES
-    layers = ["layer4_0_1"]
+    layers = ["layer3_0_1"]
+
+    group_channels_config = dict(
+        group=False,
+        group_by_kmeans=True,
+        k=50,
+        group_channels_once=True,
+    )
 
     run_train(
-        work_dir="/workspaces/secure_inference/tests/12_11_multi_channel/debug",
+        work_dir="/workspaces/secure_inference/tests/12_11_multi_channel/17_11_layer3_0_1_cluster_once_ref_p07",
         max_iters=warmup + cooldown + clustering_iters,
         validate=True,
-        eval_interval=1000,
+        eval_interval=200,
         plot=False,
         # layer_names=Params().LAYER_NAMES,
         hooks_kwargs=dict(
             layers_for_hook=layers,
-            cluster_update_freq=2500,
+            cluster_update_freq=200,
             warmup=warmup,
             cooldown=cooldown,
             drelu_stats_batch_amount=8,
-            cluster_once=False,
+            cluster_once=True,
+            preference_start=0.7,
+            group_channels_config=group_channels_config,
         ),
         batch_size=128,
     )
