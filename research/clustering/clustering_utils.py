@@ -1,4 +1,3 @@
-import copy
 import warnings
 from typing import Dict, Optional, Tuple, Union
 
@@ -9,7 +8,7 @@ from sklearn.cluster import AffinityPropagation, KMeans
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances
 
-from research.clustering.crelu_block import (
+from research.clustering.model.crelu_block import (
     create_default_labels,
     create_default_prototype,
 )
@@ -135,17 +134,15 @@ def format_clusters(
     ), "need to contain all channels if all clusters is passed"
     prototype = create_default_prototype(C=C, H=H, W=W)
     labels = create_default_labels(C=C, H=H, W=W)
-    crelu_channels, original_relu_channels = np.array([]), np.array([])
+    crelu_channels, original_relu_channels = np.full((C,), False), np.full((C,), False)
     for cur_details in clusters_details:
         clusters = cur_details["clusters"]
         channels: np.ndarray = cur_details["channels"]
         if not cur_details["all_zero"]:
             if clusters is None:
-                original_relu_channels = np.concatenate(
-                    [original_relu_channels, channels]
-                )
+                original_relu_channels[channels] = True
             else:
-                crelu_channels = np.concatenate([crelu_channels, channels])
+                crelu_channels[channels] = True
         if (
             cur_details["all_zero"]
             or cur_details["failed_to_converge"]
@@ -167,8 +164,6 @@ def format_clusters(
             prototype[0, label_channels, label_rows, label_cols] = center_channel
             prototype[1, label_channels, label_rows, label_cols] = center_row
             prototype[2, label_channels, label_rows, label_cols] = center_col
-    crelu_channels = np.sort(crelu_channels)
-    original_relu_channels = np.sort(original_relu_channels)
     return prototype, crelu_channels, original_relu_channels, labels
 
 
@@ -205,13 +200,15 @@ def plot_clustering(
     clusters: AffinityPropagation,
     H: int,
     W: int,
-    save_path=Optional[str],
-    title=Optional[str],
+    save_path: Optional[str] = None,
+    title: Optional[str] = None,
+    labels: Optional[np.ndarray] = None,
 ):
     if clusters is None:
         return
     cluster_centers_indices = clusters.cluster_centers_indices_
-    labels = clusters.labels_
+    if labels is None:
+        labels = clusters.labels_
 
     n_clusters_ = len(cluster_centers_indices)
 

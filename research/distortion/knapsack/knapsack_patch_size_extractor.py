@@ -1,20 +1,30 @@
+import argparse
 import os.path
+import pickle
+from collections import defaultdict
+
 import mmcv
 import numpy as np
-from collections import defaultdict
-from tqdm import tqdm
-import pickle
-import argparse
 import torch
+from tqdm import tqdm
 
+from research.distortion.knapsack.multiple_choice_knapsack_solver import (
+    MultipleChoiceKnapsackSolver,
+)
 from research.distortion.parameters.factory import param_factory
-from research.distortion.utils import get_num_relus
-from research.distortion.utils import get_channel_order_statistics
-from research.distortion.knapsack.multiple_choice_knapsack_solver import MultipleChoiceKnapsackSolver
+from research.distortion.utils import get_channel_order_statistics, get_num_relus
 
 
 class MultipleChoiceKnapsackPatchSizeExtractor:
-    def __init__(self, params, channel_distortion_path, ratio=None, max_cost=None, device=0, buffer_dir=None):
+    def __init__(
+        self,
+        params,
+        channel_distortion_path,
+        ratio=None,
+        max_cost=None,
+        device=0,
+        buffer_dir=None,
+    ):
 
         assert max_cost is None or ratio is None
         self.params = params
@@ -22,8 +32,11 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
         self.channel_distortion_path = channel_distortion_path
         self.buffer_dir = buffer_dir
 
-        self.channel_order_to_layer, self.channel_order_to_channel, self.channel_order_to_dim = \
-            get_channel_order_statistics(self.params)
+        (
+            self.channel_order_to_layer,
+            self.channel_order_to_channel,
+            self.channel_order_to_dim,
+        ) = get_channel_order_statistics(self.params)
 
         self.layer_name_to_noise = dict()
         self.read_noise_files()
@@ -32,9 +45,14 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
         self.channel_orders = np.arange(self.num_channels)
 
         if max_cost is None:
-            get_baseline_cost = lambda channel_order: get_num_relus(block_size=(1, 1),
-                                                                    activation_dim=self.channel_order_to_dim[ channel_order])
-            max_cost = sum(get_baseline_cost(channel_order) for channel_order in self.channel_orders)
+            get_baseline_cost = lambda channel_order: get_num_relus(
+                block_size=(1, 1),
+                activation_dim=self.channel_order_to_dim[channel_order],
+            )
+            max_cost = sum(
+                get_baseline_cost(channel_order)
+                for channel_order in self.channel_orders
+            )
             self.max_cost = int(max_cost * self.ratio)
         else:
             self.max_cost = max_cost
@@ -44,7 +62,8 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
     def read_noise_files(self):
         for layer_name in self.params.LAYER_NAMES:
             self.layer_name_to_noise[layer_name] = np.load(
-                os.path.join(self.channel_distortion_path, f"{layer_name}.npy"))
+                os.path.join(self.channel_distortion_path, f"{layer_name}.npy")
+            )
 
     def prepare_matrices(self):
         Ps = []
@@ -57,9 +76,15 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
             layer_dim = self.params.LAYER_NAME_TO_DIMS[layer_name][1]
 
             block_sizes = np.array(self.params.LAYER_NAME_TO_BLOCK_SIZES[layer_name])[
-                          :-1]  # TODO: either use [1,0] or don't infer it at all
+                :-1
+            ]  # TODO: either use [1,0] or don't infer it at all
 
-            W = np.array([get_num_relus(tuple(block_size), layer_dim) for block_size in block_sizes])
+            W = np.array(
+                [
+                    get_num_relus(tuple(block_size), layer_dim)
+                    for block_size in block_sizes
+                ]
+            )
             P = self.layer_name_to_noise[layer_name][channel_index]
 
             block_size_groups = defaultdict(list)
@@ -92,20 +117,46 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
         padding_factor = max(set([x.shape for x in Ps]))[0]
 
         Ps = np.stack(
-            [np.pad(P, (0, padding_factor - P.shape[0]), mode="constant", constant_values=-np.inf) for P in Ps])
-        Ws = np.stack([np.pad(W, (0, padding_factor - W.shape[0]), mode="constant", constant_values=0) for W in Ws])
+            [
+                np.pad(
+                    P,
+                    (0, padding_factor - P.shape[0]),
+                    mode="constant",
+                    constant_values=-np.inf,
+                )
+                for P in Ps
+            ]
+        )
+        Ws = np.stack(
+            [
+                np.pad(
+                    W,
+                    (0, padding_factor - W.shape[0]),
+                    mode="constant",
+                    constant_values=0,
+                )
+                for W in Ws
+            ]
+        )
         block_size_trackers = np.stack(
-            [np.pad(X, ((0, padding_factor - X.shape[0]), (0, 0))) for X in block_size_trackers])
+            [
+                np.pad(X, ((0, padding_factor - X.shape[0]), (0, 0)))
+                for X in block_size_trackers
+            ]
+        )
         return Ps, Ws, block_size_trackers
 
     def get_optimal_block_sizes(self):
 
         Ps, Ws, block_size_tracker = self.prepare_matrices()
 
-        dp_arg, dp = MultipleChoiceKnapsackSolver.run_multiple_choice_knapsack(Ws, Ps, self.num_channels, self.max_cost,
-                                                                               self.device, self.buffer_dir)
+        dp_arg, dp = MultipleChoiceKnapsackSolver.run_multiple_choice_knapsack(
+            Ws, Ps, self.num_channels, self.max_cost, self.device, self.buffer_dir
+        )
 
-        block_size_spec = self.convert_dp_arg_to_block_size_spec(dp_arg, Ws, block_size_tracker)
+        block_size_spec = self.convert_dp_arg_to_block_size_spec(
+            dp_arg, Ws, block_size_tracker
+        )
 
         return block_size_spec
 
@@ -122,8 +173,12 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
             block_sizes.append(block_size_tracker[channel_index, arg])
         block_sizes = np.array(block_sizes[::-1])
 
-        block_size_spec = {layer_name: np.ones(shape=(self.params.LAYER_NAME_TO_DIMS[layer_name][0], 2), dtype=np.int32)
-                           for layer_name in self.params.LAYER_NAMES}
+        block_size_spec = {
+            layer_name: np.ones(
+                shape=(self.params.LAYER_NAME_TO_DIMS[layer_name][0], 2), dtype=np.int32
+            )
+            for layer_name in self.params.LAYER_NAMES
+        }
 
         for channel_order, block_size in zip(self.channel_orders, block_sizes):
             channel_index = self.channel_order_to_channel[channel_order]
@@ -135,15 +190,15 @@ class MultipleChoiceKnapsackPatchSizeExtractor:
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description='')
+    parser = argparse.ArgumentParser(description="")
 
-    parser.add_argument('--block_size_spec_file_name', type=str)
-    parser.add_argument('--channel_distortion_path', type=str)
-    parser.add_argument('--config', type=str)
-    parser.add_argument('--ratio', type=float, default=None)
-    parser.add_argument('--max_cost', type=int, default=34816)
-    parser.add_argument('--device', type=int, default=1)
-    parser.add_argument('--buffer_dir', type=str, default=None)
+    parser.add_argument("--block_size_spec_file_name", type=str)
+    parser.add_argument("--channel_distortion_path", type=str)
+    parser.add_argument("--config", type=str)
+    parser.add_argument("--ratio", type=float, default=None)
+    parser.add_argument("--max_cost", type=int, default=None)
+    parser.add_argument("--device", type=int, default=1)
+    parser.add_argument("--buffer_dir", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -156,7 +211,8 @@ if __name__ == "__main__":
         ratio=args.ratio,
         max_cost=args.max_cost,
         device=args.device,
-        buffer_dir=args.buffer_dir)
+        buffer_dir=args.buffer_dir,
+    )
 
     block_size_spec = mck.get_optimal_block_sizes()
 

@@ -22,6 +22,9 @@ CHANNEL_COLS = [
     "diff_label_affinity",
     "prototype_affinity",
     "drelu_mean",
+    "preference",
+    "id_channel",
+    "keep_relu_channel",
 ]
 
 
@@ -62,39 +65,52 @@ class CreluLogger(WandbLoggerHook):
         batch_changed = (self.last_batch_idx is None and cur_batch_idx is not None) or (
             self.last_batch_idx < cur_batch_idx
         )
-        return batch_changed and self.crelu_example.cluster_started
+        # return batch_changed and self.crelu_example.cluster_started
+        return batch_changed
 
     def _log_general(self, runner) -> None:
         tags = {}
-        for layer_name, crelu in self.crelu_hooks.items():
-            groups_details = self._get_groups_details(crelu, return_per_channel=False)
-            channels_summary = self._summarize_groups_details(groups_details)
+        for layer_name, crelu_manager in self.crelu_hooks.items():
             layer_tags = dict(
-                batch_index=crelu.batch_idx,
-                min_inter=crelu.cur_min_inter,
-                max_inter=crelu.cur_max_inter,
-                preference=crelu.prefrence_quantile,
-                **channels_summary,
+                batch_index=crelu_manager.batch_idx,
+                min_inter=crelu_manager.crelu.inter.min().item(),
+                max_inter=crelu_manager.crelu.inter.max().item(),
+                use_sigmoid=int(crelu_manager.crelu.use_sigmoid),
+                sigmoid_factor=crelu_manager.crelu.sigmoid_factor,
             )
+            if crelu_manager.cluster_started:
+                groups_details = self._get_groups_details(
+                    crelu_manager, return_per_channel=False
+                )
+                channels_summary = self._summarize_groups_details(groups_details)
+                layer_tags.update(channels_summary)
             layer_tags = {f"{layer_name}/{k}": v for k, v in layer_tags.items()}
             tags.update(layer_tags)
-        tags.update(self._summarize_layers(tags))
+        if crelu_manager.cluster_started:
+            tags.update(self._summarize_layers(tags))
         self._log_wandb(tags, runner)
 
     def _get_groups_details(
-        self, crelu: CreluManager, return_per_channel: bool
+        self, crelu_manager: CreluManager, return_per_channel: bool
     ) -> Union[Dict[str, dict], List[dict]]:
         res = []
         res_per_channel = {}
-        channel_drelu_mean = crelu.cur_mean_drelu_maps.reshape(
-            crelu.cur_mean_drelu_maps.shape[0], -1
+        channel_drelu_mean = crelu_manager.cur_mean_drelu_maps.reshape(
+            crelu_manager.cur_mean_drelu_maps.shape[0], -1
         ).mean(axis=1)
-        for cluster_details in crelu.cur_cluster_details:
+        for cluster_details in crelu_manager.cur_cluster_details:
             clusters = cluster_details["clusters"]
-            if cluster_details["all_zero"]:
+            assert (
+                len(cluster_details["channels"]) == 1
+            ), "currently not supported with filtering channles"
+            channel = cluster_details["channels"][0]
+            id_channel = channel in crelu_manager.id_channels
+            if cluster_details["all_zero"] or id_channel:
                 cluster_amount = None
             elif clusters is None:
-                cluster_amount = crelu.H * crelu.W * cluster_details["channels"].size
+                cluster_amount = (
+                    crelu_manager.H * crelu_manager.W * cluster_details["channels"].size
+                )
             else:
                 cluster_amount = len(clusters.cluster_centers_indices_)
 
@@ -110,6 +126,9 @@ class CreluLogger(WandbLoggerHook):
             cur_res = {
                 **{k: cluster_details[k] for k in copy_keys},
                 "cluster_amount": cluster_amount,
+                "id_channel": id_channel,
+                "preference": crelu_manager.preference.get(channel),
+                "keep_relu_channel": channel in crelu_manager.keep_relu_channels,
             }
             res.append(cur_res)
             for channel in cluster_details["channels"]:
@@ -142,26 +161,31 @@ class CreluLogger(WandbLoggerHook):
 
         details = dict(
             all_zero_ratio=_agg_key("all_zero", mean=True),
+            id_channel_ratio=_agg_key("id_channel", mean=True),
             failed_ratio=_agg_key("failed_to_converge", mean=True),
-            cluster_amount_mean=_agg_key("cluster_amount", mean=False, allow_none=True),
+            cluster_amount_mean=_agg_key("cluster_amount", mean=True, allow_none=True),
+            cluster_amount_sum=_agg_key("cluster_amount", mean=False, allow_none=True),
         )
         return details
 
     def _summarize_layers(self, tags: dict) -> dict:
         original_drelu_amount = cur_drelu_amount = 0
-        channel_amount = all_zero_amount = fail_amount = 0
+        channel_amount = all_zero_amount = fail_amount = id_channel_amount = 0
 
         for layer_name, crelu in self.crelu_hooks.items():
             original_drelu_amount += crelu.C * crelu.W * crelu.H
             all_zero_ratio = tags[f"{layer_name}/all_zero_ratio"]
-            cur_drelu_amount += tags[f"{layer_name}/cluster_amount_mean"]
+            id_channel_ratio = tags[f"{layer_name}/id_channel_ratio"]
+            cur_drelu_amount += tags[f"{layer_name}/cluster_amount_sum"]
             channel_amount += crelu.C
             all_zero_amount += all_zero_ratio * crelu.C
+            id_channel_amount += id_channel_ratio * crelu.C
             fail_amount += tags[f"{layer_name}/failed_ratio"] * crelu.C
 
         details = {
             "total/drelu_ratio": cur_drelu_amount / original_drelu_amount,
             "total/all_zero_ratio": all_zero_amount / channel_amount,
+            "total/id_channel_ratio": id_channel_amount / channel_amount,
             "total/fail_ratio": fail_amount / channel_amount,
         }
         return details
