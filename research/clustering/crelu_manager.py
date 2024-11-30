@@ -264,9 +264,6 @@ class CreluManager:
         samples = format_cluster_samples(
             self.drelu_maps[:, clusters_details["channels"]]
         )
-        samples_features_first = samples.T
-        affinity_mat = get_affinity_mat(samples_features_first)
-
         finished_clustering = (
             clusters_details["clusters"] is not None
             and self.config["cluster"]["cluster_once"]
@@ -274,6 +271,7 @@ class CreluManager:
         should_cluster = self._should_cluster_channel(clusters_details)
 
         if not finished_clustering and should_cluster:
+            affinity_mat = get_affinity_mat(samples)
             preference = self.preference[clusters_details["channels"][0]]
             labels, centers_indices, all_zero, failed_to_converge = cluster_neurons(
                 samples=samples,
@@ -296,6 +294,9 @@ class CreluManager:
                     find_best_features=self.config["best_features"]["use"],
                     features_depth=self.config["best_features"]["depth"],
                     features_amount=self.config["best_features"]["amount"],
+                    tree_positive_weight=self.config["best_features"][
+                        "tree_positive_weight"
+                    ],
                 )
 
                 mean_dist_details = get_mean_dist(
@@ -318,6 +319,7 @@ class CreluManager:
                     features=clusters_details["features_data"]["features"],
                     find_best_features=self.config["best_features"]["use"],
                     decision_method=self.config["best_features"]["method"],
+                    **self.config["best_features"]["method_args"],
                 )
             )
 
@@ -450,8 +452,7 @@ class CreluManager:
             samples = format_cluster_samples(
                 self.drelu_maps[:, clusters_details["channels"]]
             )
-            samples_features_first = samples.T
-            affinity_mat = get_affinity_mat(samples_features_first)
+            affinity_mat = get_affinity_mat(samples)
 
             mean_dist_details = get_mean_dist(
                 labels=clusters["labels"],

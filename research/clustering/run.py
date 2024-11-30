@@ -352,11 +352,21 @@ def main():
         use=True,
     )
 
-    best_features_config = dict(use=True, depth=3, amount=4, method="ratio")
+    best_features_config = dict(
+        use=False,
+        depth=3,
+        amount=4,
+        method="ratio",
+        tree_positive_weight=1,
+        method_args=dict(
+            ratio_sqrt=False,
+            threshold=0.5,
+        ),
+    )
 
     warmup = 20
-    clustering_iters = 2000
-    cooldown = 4000
+    clustering_iters = 1000
+    cooldown = 3000
 
     inter_config = dict(start_value=0, end_value=1, before_activation=False)
 
@@ -367,11 +377,11 @@ def main():
 
     # print(f"------------------perf {perf}----------------")
     run_train(
-        work_dir=f"/workspaces/secure_inference/tests/26_11_multi_prototype/layer3_0_1_stats64",
+        work_dir=f"/workspaces/secure_inference/tests/26_11_multi_prototype/layer3_0_1_ref",
         validate=True,
         # eval_interval=200,
         eval_interval=500,
-        plot=True,
+        plot=False,
         ckpt=ckpt,
         # layer_names=Params().LAYER_NAMES,
         hooks_kwargs=dict(
@@ -381,7 +391,7 @@ def main():
             cluster_cooldown=cooldown,
             clustering_iters=clustering_iters,
             drelu_stats_batch_amount=10,
-            cluster_once=True,
+            cluster_once=False,
             # preference_start=perf,
             use_crelu_existing_params=False,
             group_channels_config=group_channels_config,

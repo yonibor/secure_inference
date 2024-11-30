@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -21,9 +21,18 @@ def _get_features_single_neuron(
 
 
 def get_all_features(
-    samples: np.ndarray, centers_indices: np.ndarray, depth: int, features_amount: int
+    samples: np.ndarray,
+    centers_indices: np.ndarray,
+    depth: int,
+    features_amount: int,
+    positive_weight: float,
 ):
-    classifier = DecisionTreeClassifier(random_state=42, max_depth=depth)
+    class_weight = {0: 1, 1: positive_weight}
+    classifier = DecisionTreeClassifier(
+        random_state=42,
+        max_depth=depth,
+        class_weight=class_weight,
+    )
     chosen_features, features_importance = [], []
     features = samples[:, centers_indices]
     # results = Parallel(n_jobs=-1)(
@@ -49,8 +58,8 @@ def get_all_features(
 
 
 def get_features_counts(samples: np.ndarray, features: np.ndarray) -> np.ndarray:
+    samples = samples.astype(int)
     features_amount = features.shape[-1]
-    samples.dtype == np.int
     samples_features = samples[:, features]
     truth_table = np.unpackbits(
         np.arange(2**features_amount, dtype=np.uint8)[:, None], axis=1
@@ -66,13 +75,22 @@ def get_features_counts(samples: np.ndarray, features: np.ndarray) -> np.ndarray
     return counts
 
 
-def create_decisions_map(counts: np.ndarray, method: str) -> np.ndarray:
-    assert method in ["majority", "copy", "ratio"]
-    if method == "majority":
-        decisions = counts.argmax(axis=-1)
-    elif method == "ratio":
+def create_decisions_map(
+    counts: np.ndarray,
+    method: str,
+    ratio_sqrt: bool = False,
+    threshold: Optional[float] = None,
+) -> np.ndarray:
+    assert method in ["threshold", "copy", "ratio"]
+    if method in ["ratio", "threshold"]:
         total = counts.sum(axis=-1)
-        decisions = counts[..., 1] / (total + 1e-9)
+        ratio = counts[..., 1] / (total + 1e-9)
+        if method == "ratio":
+            decisions = ratio
+            if ratio_sqrt:
+                decisions = np.sqrt(decisions)
+        elif method == "threshold":
+            decisions = ratio >= threshold
     elif method == "copy":
         assert (
             counts.shape[-2] == 2

@@ -36,24 +36,28 @@ def format_cluster_samples(drelu_maps: Union[np.ndarray, torch.Tensor]) -> np.nd
     return samples
 
 
-def get_affinity_mat(samples_features_first: np.ndarray) -> np.ndarray:
+def get_affinity_mat(samples: np.ndarray) -> np.ndarray:
+    samples_features_first = samples.T
     affinity_mat = -pairwise_distances(samples_features_first, metric="hamming")
     return affinity_mat
 
 
-def weighted_hamming_distance(samples: np.ndarray, alpha: float) -> np.ndarray:
-    pairwise_and = np.dot(samples, samples.T)  # Count (1, 1)
-    pairwise_or = np.dot(samples, 1 - samples.T)  # Count (1, 0)
-    pairwise_xor = np.dot(1 - samples, samples.T)  # Count (0, 1)
-    total_features = samples.shape[1]  # Total features per row
+def get_weighted_affinity(samples: np.ndarray, positive_weight: float) -> np.ndarray:
+    samples_features_first = samples.T
+    pairwise_11 = np.dot(samples_features_first, samples_features_first.T)
+    pairwise_10 = np.dot(samples_features_first, 1 - samples_features_first.T)
+    pairwise_01 = np.dot(1 - samples_features_first, samples_features_first.T)
 
-    pairwise_00 = total_features - (pairwise_and + pairwise_or + pairwise_xor)
+    total_features = samples_features_first.shape[1]
+    pairwise_00 = total_features - (pairwise_11 + pairwise_01 + pairwise_10)
 
-    numerator = alpha * pairwise_and + pairwise_00
-    denominator = total_features
-    distances = numerator / denominator
-
-    return distances
+    numerator = pairwise_10 + pairwise_01
+    denominator = (
+        pairwise_11 + pairwise_10 + pairwise_01 + pairwise_00 / positive_weight
+    )
+    distance = numerator / denominator
+    affinity = -distance
+    return affinity
 
 
 def get_default_clusters_details(**kwargs) -> dict:
@@ -258,11 +262,16 @@ def find_features(
     find_best_features: bool,
     features_depth: Optional[int] = None,
     features_amount: Optional[int] = None,
+    tree_positive_weight=1,
 ) -> Tuple[np.ndarray, np.ndarray]:
     samples = samples.astype(int)
     if find_best_features:
         chosen_features, features_importance = get_all_features(
-            samples, centers_indices, features_depth, features_amount
+            samples,
+            centers_indices,
+            features_depth,
+            features_amount,
+            positive_weight=tree_positive_weight,
         )
     else:
         chosen_features = centers_indices[labels, None]
@@ -275,11 +284,12 @@ def get_decisions_data(
     features: np.ndarray,
     find_best_features: bool,
     decision_method: str,
+    **method_args,
 ) -> Dict[str, np.ndarray]:
     if not find_best_features:
         decision_method = "copy"
     counts = get_features_counts(samples, features)
-    decisions = create_decisions_map(counts, decision_method)
+    decisions = create_decisions_map(counts, decision_method, **method_args)
     accuracy, id_accuracy, zero_accuracy = calc_accuracy(counts, decisions)
 
     return dict(
