@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -16,29 +16,36 @@ class ClusterRelu(nn.Module):
         C: Optional[int] = None,
         H: Optional[int] = None,
         W: Optional[int] = None,
+        features_amount: Optional[int] = None,
         prototype: Optional[Union[np.ndarray, torch.Tensor]] = None,
         labels: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        decisions: Optional[Union[np.ndarray, torch.Tensor]] = None,
         inter: Union[float, int, np.ndarray, torch.Tensor] = 0,
         inter_before_activation: bool = True,
         use_cluster_mean: bool = False,
         use_sigmoid: bool = False,
         sigmoid_factor: Optional[Union[float, int]] = None,
+        multi_prototype: bool = False,
     ) -> None:
         super(ClusterRelu, self).__init__()
         self.is_dummy = is_dummy
         self.C, self.H, self.W = C, H, W
+        self.features_amount = features_amount
         self.use_cluster_mean = use_cluster_mean
         self.use_sigmoid = use_sigmoid
         self.sigmoid_factor = sigmoid_factor
         self.inter_before_activation = inter_before_activation
+        self.multi_prototype = multi_prototype
 
+        self.register_buffer("_device_tracker", torch.empty(0))
         self.register_buffer("_prototype", self._format_prototype(prototype))
+        self.register_buffer("_labels", self._format_labels(labels))
+        self.register_buffer("_decisions", self._format_decisions(decisions))
         self.register_buffer("_inter", self._format_inter(inter))
         self.register_buffer("_crelu_channels", None)
         self.register_buffer("_original_relu_channels", None)
         self.register_buffer("_id_channels", None)
-        self.register_buffer("_labels", self._format_labels(labels))
-        self.register_buffer("_device_tracker", torch.empty(0))
+        self.register_buffer("_binary_bases", None)
 
         self.sigmoid = nn.Sigmoid()
         self.relu = nn.ReLU()
@@ -66,23 +73,34 @@ class ClusterRelu(nn.Module):
         C: Optional[int] = None,
         H: Optional[int] = None,
         W: Optional[int] = None,
+        features_amount: Optional[int] = None,
     ):
         if set_size:
-            assert not (C is None or H is None or W is None)
+            assert not (C is None or H is None or W is None or features_amount is None)
             self.C, self.H, self.W = C, H, W
+            self.features_amount = features_amount
         self.inter = 0
         self.prototype = None
         self.labels = None
+        self.decisions = None
         self.original_relu_channels = True
         self.crelu_channels = False
         self.id_channels = False
         self.verify_buffers_init()
+        if self.features_amount is not None:
+            self._init_binary_bases()
 
-    def verify_buffers_init(self):
+    def verify_buffers_init(self) -> None:
         for name, buffer in self.named_buffers():
             self._verify_not_none(buffer, name)
 
-    def _get_drelu_from_clusters(self, x):
+    def _get_drelu_from_clusters(self, x: torch.Tensor) -> torch.Tensor:
+        if self.multi_prototype:
+            return self._get_derlu_multi_prototype(x)
+        else:
+            return self._get_derlu_single_prototype(x)
+
+    def _get_derlu_single_prototype(self, x: torch.Tensor) -> torch.Tensor:
         cluster_values = self._get_cluster_values(x)
 
         inter_crelu = self.inter[self.crelu_channels]
@@ -93,8 +111,38 @@ class ClusterRelu(nn.Module):
             drelu = self._drelu_activation(x_inter)
         else:
             cluster_drelu = self._drelu_activation(cluster_values)
-            original_drelu = self._drelu_activation(x_crelu)
-            drelu = original_drelu * (1 - inter_crelu) + cluster_drelu * inter_crelu
+            x_drelu = self._drelu_activation(x_crelu)
+            drelu = x_drelu * (1 - inter_crelu) + cluster_drelu * inter_crelu
+            # id_miss = torch.logical_and(x_drelu == 1, cluster_drelu == 0)
+            # print(torch.count_nonzero(id_miss) / torch.count_nonzero(x_drelu == 1))
+        return drelu
+
+    def _get_derlu_multi_prototype(self, x: torch.Tensor) -> torch.Tensor:
+        prototype_x = self._get_cluster_examplar(x)
+        prototype_drelu = prototype_x.gt(0).int()
+        prototype_index = (prototype_drelu * self.binary_bases).sum(axis=-1)
+        cur_decisions = self.decisions[self.crelu_channels]
+        cur_decisions_expanded = cur_decisions.expand(
+            prototype_index.shape[0], -1, -1, -1, -1
+        )
+        prototype_index_expanded = prototype_index.unsqueeze(-1)
+        decisions_drelu = torch.gather(
+            cur_decisions_expanded,
+            dim=-1,
+            index=prototype_index_expanded,
+        ).squeeze(-1)
+        x_drelu = x[:, self.crelu_channels].gt(0).int()
+        cur_inter = self.inter[self.crelu_channels]
+        drelu = x_drelu * (1 - cur_inter) + decisions_drelu * cur_inter
+
+        # counts = torch.unique(
+        #     torch.round(decisions_drelu) == x_drelu, return_counts=True
+        # )[1]
+        # print(counts / counts.sum())
+        # id_miss = torch.logical_and(x_drelu == 1, decisions_drelu.round() == 0)
+        # print(torch.count_nonzero(id_miss) / torch.count_nonzero(x_drelu == 1))
+        # print("-----------------")
+
         return drelu
 
     def _drelu_activation(self, x: torch.Tensor) -> torch.Tensor:
@@ -189,7 +237,7 @@ class ClusterRelu(nn.Module):
 
     def _get_cluster_examplar(self, x: torch.Tensor) -> torch.Tensor:
         # Extract row and col indices from prototype
-        active_prototype = self.prototype[:, self.crelu_channels]
+        active_prototype = self.prototype[:, self.crelu_channels].squeeze(axis=-1)
         channels, rows, cols = (
             active_prototype[0],
             active_prototype[1],
@@ -209,9 +257,7 @@ class ClusterRelu(nn.Module):
     def prototype(
         self, new_prototype: Optional[Union[np.ndarray, torch.Tensor]]
     ) -> None:
-        self._prototype = self._format_prototype(new_prototype).to(
-            self._device_tracker.device
-        )
+        self._prototype = self._format_prototype(new_prototype)
 
     @property
     def inter(self) -> torch.Tensor:
@@ -220,7 +266,7 @@ class ClusterRelu(nn.Module):
 
     @inter.setter
     def inter(self, new_inter: Optional[Union[np.ndarray, float, torch.Tensor]]):
-        self._inter = self._format_inter(new_inter).to(self._device_tracker.device)
+        self._inter = self._format_inter(new_inter)
 
     @property
     def crelu_channels(self) -> torch.Tensor:
@@ -232,9 +278,7 @@ class ClusterRelu(nn.Module):
     def crelu_channels(
         self, new_channels: Optional[Union[torch.Tensor, np.ndarray, list]]
     ) -> None:
-        self._crelu_channels = self._format_channels(new_channels).to(
-            self._device_tracker.device
-        )
+        self._crelu_channels = self._format_channels(new_channels)
 
     @property
     def original_relu_channels(self) -> torch.Tensor:
@@ -246,9 +290,7 @@ class ClusterRelu(nn.Module):
     def original_relu_channels(
         self, new_channels: Optional[Union[torch.Tensor, np.ndarray, list]]
     ) -> None:
-        self._original_relu_channels = self._format_channels(new_channels).to(
-            self._device_tracker.device
-        )
+        self._original_relu_channels = self._format_channels(new_channels)
 
     @property
     def id_channels(self) -> torch.Tensor:
@@ -260,9 +302,7 @@ class ClusterRelu(nn.Module):
     def id_channels(
         self, new_channels: Optional[Union[torch.Tensor, np.ndarray, list]]
     ) -> None:
-        self._id_channels = self._format_channels(new_channels).to(
-            self._device_tracker.device
-        )
+        self._id_channels = self._format_channels(new_channels)
 
     @property
     def labels(self) -> torch.Tensor:
@@ -271,7 +311,18 @@ class ClusterRelu(nn.Module):
 
     @labels.setter
     def labels(self, new_labels: Optional[Union[np.ndarray, torch.Tensor]]) -> None:
-        self._labels = self._format_labels(new_labels).to(self._device_tracker.device)
+        self._labels = self._format_labels(new_labels)
+
+    @property
+    def decisions(self) -> torch.Tensor:
+        self._verify_not_none(self._decisions)
+        return self._decisions
+
+    @decisions.setter
+    def decisions(
+        self, new_decisions: Optional[Union[np.ndarray, torch.Tensor]]
+    ) -> None:
+        self._decisions = self._format_decisions(new_decisions)
 
     def _verify_channels(self):
         channels_combined = torch.stack(
@@ -281,22 +332,60 @@ class ClusterRelu(nn.Module):
         if torch.any(channels_combined > 1):
             raise ValueError("channel on multiple lists")
 
+    @property
+    def binary_bases(self):
+        if self._binary_bases is None:
+            self._init_binary_bases()
+        return self._binary_bases
+
+    def _init_binary_bases(self):
+        if self.features_amount is None:
+            raise ValueError(
+                "can't init binary to decimal if features amount is not set"
+            )
+        bases = 2 ** torch.arange(self.features_amount - 1, -1, -1, dtype=torch.int)
+        self._binary_bases = self._set_device(bases)
+
     def _format_prototype(
         self, prototype: Optional[Union[np.ndarray, torch.Tensor]]
     ) -> Optional[torch.Tensor]:
-        if prototype is not None:
-            if isinstance(prototype, np.ndarray):
-                prototype = torch.from_numpy(prototype)
+        return self._format_data(prototype, create_default_prototype)
+
+    def _format_data(
+        self,
+        data: Optional[Union[np.ndarray, torch.Tensor]],
+        default_func: Callable,
+        set_device: bool = True,
+    ) -> Optional[torch.Tensor]:
+        if data is not None:
+            if isinstance(data, np.ndarray):
+                data = torch.from_numpy(data)
             else:
-                prototype = prototype.clone()
-        elif self.C is None or self.H is None or self.W is None:
+                data = data.clone()
+        elif (
+            self.C is None
+            or self.H is None
+            or self.W is None
+            or self.features_amount is None
+        ):
             return None
         else:
-            prototype = create_default_prototype(C=self.C, H=self.H, W=self.W)
-        return prototype
+            data = default_func(
+                C=self.C, H=self.H, W=self.W, features_amount=self.features_amount
+            )
+        if set_device:
+            data = self._set_device(data)
+        return data
+
+    def _format_decisions(
+        self, decisions: Optional[Union[np.ndarray, torch.Tensor]]
+    ) -> Optional[torch.Tensor]:
+        return self._format_data(decisions, create_default_decisions)
 
     def _format_inter(
-        self, inter: Union[float, int, np.ndarray, torch.Tensor]
+        self,
+        inter: Union[float, int, np.ndarray, torch.Tensor],
+        set_device: bool = True,
     ) -> torch.Tensor:
         if isinstance(inter, np.ndarray):
             inter = torch.from_numpy(inter)
@@ -309,10 +398,14 @@ class ClusterRelu(nn.Module):
         assert torch.all(
             torch.logical_and(inter >= 0, inter <= 1)
         )  # TODO: remove at real time
+        if set_device:
+            inter = self._set_device(inter)
         return inter
 
     def _format_channels(
-        self, channels: Union[torch.Tensor, np.ndarray, list, bool]
+        self,
+        channels: Union[torch.Tensor, np.ndarray, list, bool],
+        set_device: bool = True,
     ) -> torch.Tensor:
         if isinstance(channels, bool):
             channels = torch.full((self.C,), channels)
@@ -321,21 +414,14 @@ class ClusterRelu(nn.Module):
         else:
             channels = channels.clone().bool()
         assert channels.numel() == self.C
+        if set_device:
+            channels = self._set_device(channels)
         return channels
 
     def _format_labels(
         self, labels: Optional[Union[np.ndarray, torch.Tensor]]
     ) -> torch.Tensor:
-        if labels is not None:
-            if isinstance(labels, np.ndarray):
-                labels = torch.from_numpy(labels)
-            else:
-                labels = labels.clone()
-        elif self.C is None or self.H is None or self.W is None:
-            return None
-        else:
-            labels = create_default_labels(C=self.C, H=self.H, W=self.W)
-        return labels
+        return self._format_data(labels, create_default_labels)
 
     @staticmethod
     def _verify_not_none(val: Optional[torch.Tensor], name: Optional[str] = None):
@@ -345,15 +431,31 @@ class ClusterRelu(nn.Module):
             message = f"Buffer {name} is None, it wasn't initialized properly"
             raise CReluNotInitError(message)
 
+    def _set_device(self, buffer: torch.Tensor) -> torch.Tensor:
+        return buffer.to(self._device_tracker.device)
 
-def create_default_prototype(C: int, H: int, W: int) -> torch.Tensor:
+
+def create_default_prototype(
+    C: int, H: int, W: int, features_amount: int
+) -> torch.Tensor:
     prototype = torch.meshgrid(
-        torch.arange(C), torch.arange(H), torch.arange(W), indexing="ij"
+        torch.arange(C),
+        torch.arange(H),
+        torch.arange(W),
+        indexing="ij",
     )
     prototype = torch.stack(prototype, dim=0)
+    prototype = prototype.unsqueeze(-1).repeat(1, 1, 1, 1, features_amount)
     return prototype
 
 
-def create_default_labels(C: int, H: int, W: int) -> torch.Tensor:
+def create_default_decisions(
+    C: int, H: int, W: int, features_amount: int
+) -> torch.Tensor:
+    decisions = torch.zeros(size=(C, H, W, 2**features_amount), dtype=torch.float)
+    return decisions
+
+
+def create_default_labels(C: int, H: int, W: int, **kwargs) -> torch.Tensor:
     labels = torch.arange(H * W).view(1, H, W).repeat(C, 1, 1)
     return labels

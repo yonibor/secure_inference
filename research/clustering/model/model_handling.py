@@ -2,7 +2,7 @@ from typing import Tuple
 
 from torch import nn
 
-from .model.crelu_block import ClusterRelu
+from .crelu_block import ClusterRelu
 
 
 def _get_layer_details(model, layer_name) -> Tuple[nn.Module, str]:

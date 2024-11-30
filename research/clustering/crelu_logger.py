@@ -25,6 +25,9 @@ CHANNEL_COLS = [
     "preference",
     "id_channel",
     "keep_relu_channel",
+    "decisions_accuracy",
+    "decisions_id_accuracy",
+    "decisions_zero_accuracy",
 ]
 
 
@@ -50,6 +53,7 @@ class CreluLogger(WandbLoggerHook):
         layer_name_example = sorted(list(self.crelu_hooks.keys()))[0]
         self.crelu_example = self.crelu_hooks[layer_name_example]
         self.last_batch_idx = self.crelu_example.batch_idx
+        self.already_plotted = {layer_name: False for layer_name in self.crelu_hooks}
 
     def after_train_iter(self, runner) -> None:
         super().after_train_iter(runner)
@@ -98,21 +102,28 @@ class CreluLogger(WandbLoggerHook):
         channel_drelu_mean = crelu_manager.cur_mean_drelu_maps.reshape(
             crelu_manager.cur_mean_drelu_maps.shape[0], -1
         ).mean(axis=1)
-        for cluster_details in crelu_manager.cur_cluster_details:
-            clusters = cluster_details["clusters"]
+        for clusters_details in crelu_manager.cur_clusters_details:
+            clusters = clusters_details["clusters"]
+            features_data = clusters_details["features_data"]
             assert (
-                len(cluster_details["channels"]) == 1
+                len(clusters_details["channels"]) == 1
             ), "currently not supported with filtering channles"
-            channel = cluster_details["channels"][0]
+            channel = clusters_details["channels"][0]
             id_channel = channel in crelu_manager.id_channels
-            if cluster_details["all_zero"] or id_channel:
+            decisions_accuracy = decisions_id_accuracy = decisions_zero_accuracy = None
+            if clusters_details["all_zero"] or id_channel:
                 cluster_amount = None
             elif clusters is None:
                 cluster_amount = (
-                    crelu_manager.H * crelu_manager.W * cluster_details["channels"].size
+                    crelu_manager.H
+                    * crelu_manager.W
+                    * clusters_details["channels"].size
                 )
             else:
-                cluster_amount = len(clusters.cluster_centers_indices_)
+                cluster_amount = len(clusters["centers_indices"])
+                decisions_accuracy = features_data["accuracy"]
+                decisions_id_accuracy = features_data["id_accuracy"]
+                decisions_zero_accuracy = features_data["zero_accuracy"]
 
             copy_keys = [
                 "all_zero",
@@ -124,14 +135,17 @@ class CreluLogger(WandbLoggerHook):
                 "channels",
             ]
             cur_res = {
-                **{k: cluster_details[k] for k in copy_keys},
+                **{k: clusters_details[k] for k in copy_keys},
                 "cluster_amount": cluster_amount,
                 "id_channel": id_channel,
                 "preference": crelu_manager.preference.get(channel),
                 "keep_relu_channel": channel in crelu_manager.keep_relu_channels,
+                "decisions_accuracy": decisions_accuracy,
+                "decisions_id_accuracy": decisions_id_accuracy,
+                "decisions_zero_accuracy": decisions_zero_accuracy,
             }
             res.append(cur_res)
-            for channel in cluster_details["channels"]:
+            for channel in clusters_details["channels"]:
                 channel_res = cur_res.copy()
                 channel_res["drelu_mean"] = channel_drelu_mean[channel]
                 res_per_channel[channel] = channel_res
@@ -165,6 +179,15 @@ class CreluLogger(WandbLoggerHook):
             failed_ratio=_agg_key("failed_to_converge", mean=True),
             cluster_amount_mean=_agg_key("cluster_amount", mean=True, allow_none=True),
             cluster_amount_sum=_agg_key("cluster_amount", mean=False, allow_none=True),
+            decisions_accuracy=_agg_key(
+                "decisions_accuracy", mean=True, allow_none=True
+            ),
+            decisions_id_accuracy=_agg_key(
+                "decisions_id_accuracy", mean=True, allow_none=True
+            ),
+            decisions_zero_accuracy=_agg_key(
+                "decisions_zero_accuracy", mean=True, allow_none=True
+            ),
         )
         return details
 
@@ -230,7 +253,11 @@ class CreluLogger(WandbLoggerHook):
 
     def _plot(self) -> None:
         for layer_name, crelu in self.crelu_hooks.items():
-            for channel in range(crelu.C):
+            if self.already_plotted[layer_name]:
+                continue
+            self.already_plotted[layer_name] = True
+            for clusters_details in crelu.cur_clusters_details:
+                channel = clusters_details["id"]
                 cluster_path = os.path.join(
                     self.cluster_dir,
                     layer_name,
@@ -241,18 +268,19 @@ class CreluLogger(WandbLoggerHook):
                     layer_name,
                     f"batch_{crelu.batch_idx}_channel_{channel}.png",
                 )
-                title = (
-                    f"inter min {crelu.cur_min_inter:.2f}, "
-                    f"max {crelu.cur_max_inter:.2f}, "
-                    f"pref quantile {crelu.prefrence_quantile:.2f}, "
-                )
-                plot_clustering(
-                    crelu.cur_cluster_details[channel]["clusters"],
-                    H=crelu.H,
-                    W=crelu.W,
-                    save_path=cluster_path,
-                    title=title,
-                )
+                title = f"batch: {crelu.batch_idx}, channel: {channel}"
+                clusters = clusters_details["clusters"]
+                if clusters is not None:
+                    cluster_amount = len(clusters["centers_indices"])
+                    clusters_title = f"{title}, cluster amount: {cluster_amount}"
+                    plot_clustering(
+                        labels=clusters["labels"],
+                        cluster_centers_indices=clusters["centers_indices"],
+                        H=crelu.H,
+                        W=crelu.W,
+                        save_path=cluster_path,
+                        title=clusters_title,
+                    )
                 plot_drelu(
                     crelu.cur_mean_drelu_maps[channel],
                     save_path=drelu_path,

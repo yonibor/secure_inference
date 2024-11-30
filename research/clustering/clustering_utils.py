@@ -1,5 +1,5 @@
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,8 +9,15 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances
 
 from research.clustering.model.crelu_block import (
+    create_default_decisions,
     create_default_labels,
     create_default_prototype,
+)
+from research.clustering.multi_prototype_utils import (
+    calc_accuracy,
+    create_decisions_map,
+    get_all_features,
+    get_features_counts,
 )
 
 
@@ -25,21 +32,36 @@ def format_cluster_samples(drelu_maps: Union[np.ndarray, torch.Tensor]) -> np.nd
     assert (
         isinstance(drelu_maps, np.ndarray) and drelu_maps.ndim == 4
     ), "incorrect input format"
-    samples = drelu_maps.reshape(drelu_maps.shape[0], -1).T
+    samples = drelu_maps.reshape(drelu_maps.shape[0], -1)
     return samples
 
 
-def get_affinity_mat(drelu_maps: np.ndarray) -> np.ndarray:
-    samples = format_cluster_samples(drelu_maps)
-    affinity_mat = -pairwise_distances(samples, metric="hamming")
+def get_affinity_mat(samples_features_first: np.ndarray) -> np.ndarray:
+    affinity_mat = -pairwise_distances(samples_features_first, metric="hamming")
     return affinity_mat
 
 
-def get_default_cluster_details(**kwargs) -> dict:
+def weighted_hamming_distance(samples: np.ndarray, alpha: float) -> np.ndarray:
+    pairwise_and = np.dot(samples, samples.T)  # Count (1, 1)
+    pairwise_or = np.dot(samples, 1 - samples.T)  # Count (1, 0)
+    pairwise_xor = np.dot(1 - samples, samples.T)  # Count (0, 1)
+    total_features = samples.shape[1]  # Total features per row
+
+    pairwise_00 = total_features - (pairwise_and + pairwise_or + pairwise_xor)
+
+    numerator = alpha * pairwise_and + pairwise_00
+    denominator = total_features
+    distances = numerator / denominator
+
+    return distances
+
+
+def get_default_clusters_details(**kwargs) -> dict:
     details = dict(
         clusters=None,
+        features_data=None,
         channels=None,
-        id=id,
+        id=None,
         all_zero=False,
         failed_to_converge=False,
         same_label_affinity=0,
@@ -50,121 +72,109 @@ def get_default_cluster_details(**kwargs) -> dict:
     return details
 
 
-def _verify_keys(details):
-    assert set(details.keys()) == set(get_default_cluster_details().keys())
-
-
 def cluster_neurons(
-    drelu_maps: np.ndarray,
-    prev_cluster_details: dict,
+    samples: np.ndarray,
+    affinity_mat: np.ndarray,
     no_converge_fail: bool = True,
-    precompute_affinity: bool = True,
     preference_quantile: Optional[float] = None,
-) -> Dict:
-    results = get_default_cluster_details(
-        clusters=prev_cluster_details["clusters"],
-        id=prev_cluster_details["id"],
-        channels=prev_cluster_details["channels"],
-    )
-    if not np.any(drelu_maps):
-        results["all_zero"] = True
-        _verify_keys(results)
-        return results
-
-    assert not (
-        not precompute_affinity and preference_quantile is not None
-    ), "to get the prefrence you need to precomutpe the affinity matrix"
-    affinity_mat = get_affinity_mat(drelu_maps)
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool]:
+    labels = centers_indices = None
+    all_zero = failed_to_converge = False
+    if not np.any(samples):
+        all_zero = True
+        return labels, centers_indices, all_zero, failed_to_converge
     preference = None
-    if precompute_affinity:
-        algo_input = affinity_mat
-        input_type = "precomputed"
-        if preference_quantile is not None:
-            preference = np.quantile(affinity_mat, preference_quantile)
-    else:
-        algo_input = format_cluster_samples(drelu_maps)
-        input_type = "euclidean"
+    if preference_quantile is not None:
+        preference = np.quantile(affinity_mat, preference_quantile)
     with warnings.catch_warnings(record=True) as caught_warnings:
         clusters = AffinityPropagation(
             random_state=42,
-            affinity=input_type,
+            affinity="precomputed",
             preference=preference,
             max_iter=300,
-        ).fit(algo_input)
+        ).fit(affinity_mat)
+        labels = clusters.labels_
+        centers_indices = clusters.cluster_centers_indices_
         for warning in caught_warnings:
             if warning.category == ConvergenceWarning and no_converge_fail:
-                results["failed_to_converge"] = True
-
-    if not results["failed_to_converge"]:
-        results["clusters"] = clusters
-    (
-        results["same_label_affinity"],
-        results["diff_label_affinity"],
-        results["prototype_affinity"],
-    ) = get_mean_dist(results.get("clusters"), affinity_mat)
-    _verify_keys(results)
-    return results
+                failed_to_converge = True
+                break
+    return labels, centers_indices, all_zero, failed_to_converge
 
 
-def get_mean_dist(clusters: AffinityPropagation, affinity_mat: np.ndarray):
-    same_label_affinity = diff_label_affinity = prototype_affinity = None
-    if clusters is None:
-        return same_label_affinity, diff_label_affinity, prototype_affinity
-    labels = clusters.labels_
+def get_mean_dist(
+    labels: np.ndarray,
+    centers_indices: np.ndarray,
+    affinity_mat: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    labels = labels.squeeze()
     same_label_mask = labels[:, None] == labels[None, :]
     if same_label_mask.any():
         same_label_affinity = affinity_mat[same_label_mask].mean()
     if not same_label_mask.all():
         diff_label_affinity = affinity_mat[~same_label_mask].mean()
-    prototype_indices = clusters.cluster_centers_indices_[labels]
+    prototype_indices = centers_indices[labels]
     prototype_affinity = affinity_mat[np.arange(len(labels)), prototype_indices].mean()
-    return same_label_affinity, diff_label_affinity, prototype_affinity
+    return dict(
+        same_label_affinity=same_label_affinity,
+        diff_label_affinity=diff_label_affinity,
+        prototype_affinity=prototype_affinity,
+    )
 
 
 def format_clusters(
     C: int,
     H: int,
     W: int,
+    features_amount: int,
     clusters_details: Dict[str, Dict] = {},
+    id_channels: List[int] = [],
     all_clusters: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     all_channels = np.concatenate([details["channels"] for details in clusters_details])
     assert not (
         all_clusters and set(all_channels) != set(range(C))
     ), "need to contain all channels if all clusters is passed"
-    prototype = create_default_prototype(C=C, H=H, W=W)
+    prototype = create_default_prototype(C=C, H=H, W=W, features_amount=features_amount)
+    decisions = create_default_decisions(C=C, H=H, W=W, features_amount=features_amount)
     labels = create_default_labels(C=C, H=H, W=W)
-    crelu_channels, original_relu_channels = np.full((C,), False), np.full((C,), False)
+    crelu_channels_bool = np.full((C,), False)
+    original_relu_channels_bool = crelu_channels_bool.copy()
+
     for cur_details in clusters_details:
         clusters = cur_details["clusters"]
+        features_data = cur_details["features_data"]
         channels: np.ndarray = cur_details["channels"]
-        if not cur_details["all_zero"]:
+        assert channels.shape[0] == 1, "currently only supports single channel"
+        channel = channels[0]
+        is_id_channel = channel in id_channels
+        if not (cur_details["all_zero"] or is_id_channel):
             if clusters is None:
-                original_relu_channels[channels] = True
+                original_relu_channels_bool[channels] = True
             else:
-                crelu_channels[channels] = True
-        if (
-            cur_details["all_zero"]
-            or cur_details["failed_to_converge"]
-            or (clusters is None)
-        ):
+                crelu_channels_bool[channels] = True
+        if is_id_channel or cur_details["all_zero"] or (clusters is None):
             continue
-        cluster_centers_indices = clusters.cluster_centers_indices_
-        cur_labels = clusters.labels_.reshape(channels.size, H, W)
+        cur_labels = clusters["labels"].reshape(channels.size, H, W)
+        cur_decisions = features_data["decisions"].reshape(channels.size, H, W, -1)
         labels[channels] = torch.from_numpy(cur_labels)
-        for label, cluster_idx in enumerate(cluster_centers_indices):
-            label_local_channels, label_rows, label_cols = np.nonzero(
-                cur_labels == label
-            )
-            label_channels = channels[label_local_channels]
-            center_local_channel, center_row, center_col = np.unravel_index(
-                cluster_idx, cur_labels.shape
-            )
-            center_channel = channels[center_local_channel]
-            prototype[0, label_channels, label_rows, label_cols] = center_channel
-            prototype[1, label_channels, label_rows, label_cols] = center_row
-            prototype[2, label_channels, label_rows, label_cols] = center_col
-    return prototype, crelu_channels, original_relu_channels, labels
+        decisions[channels] = torch.from_numpy(cur_decisions).to(decisions.dtype)
+
+        features_unraveled = np.stack(
+            np.unravel_index(features_data["features"], (H, W)), axis=0
+        )
+        features_unraveled = features_unraveled.reshape(
+            features_unraveled.shape[0], H, W, -1
+        )
+        prototype[1:, channels] = torch.from_numpy(features_unraveled).unsqueeze(1)
+
+    return (
+        prototype,
+        decisions,
+        crelu_channels_bool,
+        original_relu_channels_bool,
+        labels,
+    )
 
 
 def cluster_channels_kmeans(drelu_maps: np.ndarray, k: int):
@@ -197,18 +207,13 @@ def plot_drelu(
 
 
 def plot_clustering(
-    clusters: AffinityPropagation,
+    labels: np.ndarray,
+    cluster_centers_indices: np.ndarray,
     H: int,
     W: int,
     save_path: Optional[str] = None,
     title: Optional[str] = None,
-    labels: Optional[np.ndarray] = None,
 ):
-    if clusters is None:
-        return
-    cluster_centers_indices = clusters.cluster_centers_indices_
-    if labels is None:
-        labels = clusters.labels_
 
     n_clusters_ = len(cluster_centers_indices)
 
@@ -244,3 +249,43 @@ def plot_clustering(
         plt.show()
     else:
         plt.savefig(save_path)
+
+
+def find_features(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    centers_indices: np.ndarray,
+    find_best_features: bool,
+    features_depth: Optional[int] = None,
+    features_amount: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    samples = samples.astype(int)
+    if find_best_features:
+        chosen_features, features_importance = get_all_features(
+            samples, centers_indices, features_depth, features_amount
+        )
+    else:
+        chosen_features = centers_indices[labels, None]
+        features_importance = None
+    return dict(features=chosen_features, features_importance=features_importance)
+
+
+def get_decisions_data(
+    samples: np.ndarray,
+    features: np.ndarray,
+    find_best_features: bool,
+    decision_method: str,
+) -> Dict[str, np.ndarray]:
+    if not find_best_features:
+        decision_method = "copy"
+    counts = get_features_counts(samples, features)
+    decisions = create_decisions_map(counts, decision_method)
+    accuracy, id_accuracy, zero_accuracy = calc_accuracy(counts, decisions)
+
+    return dict(
+        features_counts=counts,
+        decisions=decisions,
+        accuracy=accuracy,
+        id_accuracy=id_accuracy,
+        zero_accuracy=zero_accuracy,
+    )

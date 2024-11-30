@@ -4,7 +4,7 @@ from mmcls.models.backbones import ResNet_CIFAR
 from mmcls.models.backbones.resnet import BasicBlock
 from mmcls.models.builder import BACKBONES
 
-from research.clustering.model_handling import get_layer, set_layer
+from research.clustering.model.model_handling import get_layer, set_layer
 from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar100 import (
     Params,
 )
@@ -62,7 +62,7 @@ class ResNet_CIFAR_CRELU(ResNet_CIFAR):
         152: (BasicBlockCrelu, (3, 8, 36, 3)),
     }
 
-    def __init__(self, **kwargs):
+    def __init__(self, crelu_features_amount, **kwargs):
         super(ResNet_CIFAR_CRELU, self).__init__(**kwargs)
         assert kwargs["depth"] == 18  # only supported currently
 
@@ -70,8 +70,10 @@ class ResNet_CIFAR_CRELU(ResNet_CIFAR):
 
         for layer_name, (C, H, W) in layers_to_dims.items():
             if layer_name == "stem":
-                layer = ClusterRelu(is_dummy=True, C=C, H=H, W=W)
+                layer = ClusterRelu(is_dummy=True)
                 set_layer(self, layer_name, layer)
             else:
                 layer: ClusterRelu = get_layer(self, layer_name)
-            layer.set_default_values(set_size=True, C=C, H=H, W=W)
+            layer.set_default_values(
+                set_size=True, C=C, H=H, W=W, features_amount=crelu_features_amount
+            )

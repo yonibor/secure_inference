@@ -67,7 +67,7 @@ def run_train(work_dir, validate, eval_interval, plot, batch_size, ckpt, hooks_k
     cfg.runner.type = "IterBasedRunner"
     if "max_epochs" in cfg.runner:
         del cfg.runner["max_epochs"]
-    cfg.lr_config = {"policy": "step", "step": [5000, 25000], "gamma": 0.2}
+    cfg.lr_config = {"policy": "step", "step": [25000, 35000], "gamma": 0.33}
     cfg.workflow[0] = ("train", 5)
     cfg.workflow[1] = ("val", 0)
     cfg.evaluation = dict(interval=eval_interval, by_epoch=False)
@@ -97,6 +97,12 @@ def run_train(work_dir, validate, eval_interval, plot, batch_size, ckpt, hooks_k
     cfg.seed = seed
     meta["seed"] = seed
 
+    crelu_features_amount = (
+        1
+        if not hooks_kwargs["best_features_config"]["use"]
+        else hooks_kwargs["best_features_config"]["amount"]
+    )
+    cfg.model["backbone"]["crelu_features_amount"] = crelu_features_amount
     model = build_classifier(cfg.model)
     model.init_weights()
 
@@ -141,6 +147,10 @@ def run_train(work_dir, validate, eval_interval, plot, batch_size, ckpt, hooks_k
                     "lr": cfg.optimizer.lr,
                     "max_iters": max_iters,
                     "batch_size": batch_size,
+                    "eval_interval": eval_interval,
+                    "work_dir": work_dir,
+                    "ckpt": ckpt,
+                    "lr_config": cfg.lr_config,
                 },
             },
             interval=10,
@@ -179,10 +189,10 @@ def _add_crelu_hooks(
     group_channels_config,
     sigmoid_config,
     id_config,
+    best_features_config,
     clustering_iters,
     batch_size,
-    clustering_stats_dir,
-    knapsack_path,
+    clustering_priority_path,
     layer_names,
     **kwargs,
 ):
@@ -193,12 +203,7 @@ def _add_crelu_hooks(
     layers_args = {}
     use_cluster_mean = False
 
-    priority = prioritize_channels(
-        clustering_stats_dir, knapsack_path, Params().LAYER_NAME_TO_DIMS
-    )
-    os.makedirs(work_dir, exist_ok=True)
-    priority.to_csv(os.path.join(work_dir, "prioritize"))
-    # priority = pd.read_csv(os.path.join(work_dir, "prioritize"))
+    priority = pd.read_csv(clustering_priority_path)
 
     formatted_priority = format_per_layer(priority, layer_names)
 
@@ -233,6 +238,7 @@ def _add_crelu_hooks(
         },
         "sigmoid": sigmoid_config,
         "group_channels": group_channels_config,
+        "best_features": best_features_config,
     }
 
     for layer_name in layer_names:
@@ -315,9 +321,10 @@ def main():
     #     set(Params().LAYER_NAMES)
     #     - set(["layer2_0_1", "layer3_0_1", "layer4_0_1", "layer3_1_2"])
     # )
-    # layers_for_hook=["layer1_0_1"],
-    layers = Params().LAYER_NAMES
-    # layers = ["layer3_0_1"]
+    # layers = ["layer1_0_1"]
+    # layers = Params().LAYER_NAMES
+    layers = ["layer3_0_1"]
+    # layers = ["layer4_1_2"]
 
     group_channels_config = dict(
         group=False,
@@ -340,18 +347,18 @@ def main():
         ),
     )
 
-    id_config = {
-        # "iters": 6000,
-        "id_warmup": 300,
-        "use": False,
-    }
+    id_config = dict(
+        iters=100,
+        use=True,
+    )
+
+    best_features_config = dict(use=True, depth=3, amount=4, method="ratio")
 
     warmup = 20
-    # warmup = 300
-    clustering_iters = 1000
-    cooldown = 10000
+    clustering_iters = 2000
+    cooldown = 4000
 
-    inter_config = dict(start_value=0, end_value=1, before_activation=True)
+    inter_config = dict(start_value=0, end_value=1, before_activation=False)
 
     ckpt = "/workspaces/secure_inference/tests/resnet18_10_8/latest.pth"
     # ckpt = "/workspaces/secure_inference/tests/24_11_prioritize/full_08_v3/latest.pth"
@@ -360,21 +367,20 @@ def main():
 
     # print(f"------------------perf {perf}----------------")
     run_train(
-        work_dir=f"/workspaces/secure_inference/tests/26_11_multi_prototype/all_stats",
+        work_dir=f"/workspaces/secure_inference/tests/26_11_multi_prototype/layer3_0_1_stats64",
         validate=True,
         # eval_interval=200,
-        eval_interval=1500,
-        plot=False,
+        eval_interval=500,
+        plot=True,
         ckpt=ckpt,
         # layer_names=Params().LAYER_NAMES,
         hooks_kwargs=dict(
             layer_names=layers,
-            cluster_update_freq=1000,
-            # cluster_update_freq=8,
+            cluster_update_freq=100,
             warmup=warmup,
             cluster_cooldown=cooldown,
             clustering_iters=clustering_iters,
-            drelu_stats_batch_amount=8,
+            drelu_stats_batch_amount=10,
             cluster_once=True,
             # preference_start=perf,
             use_crelu_existing_params=False,
@@ -382,8 +388,10 @@ def main():
             sigmoid_config=sigmoid_config,
             inter_config=inter_config,
             id_config=id_config,
-            clustering_stats_dir="/workspaces/secure_inference/tests/22_cluster_amount_stats",
-            knapsack_path="/workspaces/secure_inference/tests/distortion_extraction_22_11_512/block_spec/0.08.pickle",
+            best_features_config=best_features_config,
+            clustering_priority_path="/workspaces/secure_inference/tests/general_stats/prioritize_29_11_24.csv",
+            # clustering_stats_dir="/workspaces/secure_inference/tests/22_cluster_amount_stats",
+            # knapsack_path="/workspaces/secure_inference/tests/distortion_extraction_22_11_512/block_spec/0.08.pickle",
         ),
         batch_size=128,
     )

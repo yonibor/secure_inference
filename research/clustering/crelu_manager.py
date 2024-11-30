@@ -11,13 +11,16 @@ from torch import nn
 from research.clustering.clustering_utils import (
     cluster_channels_kmeans,
     cluster_neurons,
+    find_features,
+    format_cluster_samples,
     format_clusters,
     get_affinity_mat,
-    get_default_cluster_details,
+    get_decisions_data,
+    get_default_clusters_details,
     get_mean_dist,
 )
 from research.clustering.model.crelu_block import ClusterRelu
-from research.clustering.model_handling import get_layer
+from research.clustering.model.model_handling import get_layer
 from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar100 import (
     Params as resnet18_8xb16_cifar100_Params,
 )
@@ -51,19 +54,22 @@ class CreluManager:
         self.use_crelu_existing_params = use_crelu_existing_params
         self.preference = preference
         self.id_channels = id_channels
+        # self.id_channels = [
+        #     c for c in range(self.C) if c != 0
+        # ]  # TODO yoni: remove!!!!!!!!!!!!!!!
+        # self.id_channels = list(range(self.C))  # TODO yoni: remove!!!!!!!!!!!!!!!
         self.keep_relu_channels = keep_relu_channels
 
         self.batch_idx = 0
         self.drelu_maps = self.prev_drelu_maps = None
         self.drelu_maps_counter = 0
-        self.cur_cluster_details = [
-            get_default_cluster_details(channels=np.array([channel]), id=channel)
+        self.cur_clusters_details = [
+            get_default_clusters_details(channels=np.array([channel]), id=channel)
             for channel in range(self.C)
         ]
         self.cur_mean_drelu_maps = None
 
         self._init_crelu()
-        self.cluster_started = False
 
     def hook_fn(
         self, module: nn.Module, input: torch.Tensor, output: torch.Tensor
@@ -101,7 +107,7 @@ class CreluManager:
         config = self.config["id_warmup"]
         if config["use"] and self.batch_idx == config["start"]:
             print(
-                f"---------------- {self.layer_name}: start id layers ----------------"
+                f"---------------- {self.layer_name}, batch {self.batch_idx}: start id layers ----------------"
             )
             self.crelu.original_relu_channels[self.id_channels] = False
             self.crelu.id_channels[self.id_channels] = True
@@ -243,41 +249,77 @@ class CreluManager:
         self.drelu_maps_counter += 1
         assert self.drelu_maps_counter <= self.config["drelu_stats"]["batch_amount"]
 
-    def _get_single_group_clusters(self, prev_cluster_details: dict) -> None:
-        finished_clustering = (
-            prev_cluster_details["clusters"] is not None
-            and self.config["cluster"]["cluster_once"]
-        )
-
+    def _should_cluster_channel(self, clusters_details: dict) -> bool:
         assert (
             not self.config["group_channels"]["group"]
-            and len(prev_cluster_details["channels"]) == 1
+            and len(clusters_details["channels"]) == 1
         ), "currently not supported with filtering channles"
 
-        channel = prev_cluster_details["channels"][0]
+        channel = clusters_details["channels"][0]
         no_cluster_channels = self.id_channels + self.keep_relu_channels
-        if not finished_clustering and channel not in no_cluster_channels:
-            prev_cluster_details = cluster_neurons(
-                self.drelu_maps[:, prev_cluster_details["channels"]],
-                prev_cluster_details=prev_cluster_details,
-                preference_quantile=self.preference[channel],
+        should_cluster = channel not in no_cluster_channels
+        return should_cluster
+
+    def _update_single_group_clusters(self, clusters_details: dict) -> None:
+        samples = format_cluster_samples(
+            self.drelu_maps[:, clusters_details["channels"]]
+        )
+        samples_features_first = samples.T
+        affinity_mat = get_affinity_mat(samples_features_first)
+
+        finished_clustering = (
+            clusters_details["clusters"] is not None
+            and self.config["cluster"]["cluster_once"]
+        )
+        should_cluster = self._should_cluster_channel(clusters_details)
+
+        if not finished_clustering and should_cluster:
+            preference = self.preference[clusters_details["channels"][0]]
+            labels, centers_indices, all_zero, failed_to_converge = cluster_neurons(
+                samples=samples,
+                preference_quantile=preference,
                 no_converge_fail=self.cluster_no_converge_fail,
+                affinity_mat=affinity_mat,
             )
+            clusters_details.update(
+                all_zero=all_zero, failed_to_converge=failed_to_converge
+            )
+            if not failed_to_converge:
+                clusters_details["clusters"] = dict(
+                    labels=labels,
+                    centers_indices=centers_indices,
+                )
+                clusters_details["features_data"] = find_features(
+                    samples=samples,
+                    labels=labels,
+                    centers_indices=centers_indices,
+                    find_best_features=self.config["best_features"]["use"],
+                    features_depth=self.config["best_features"]["depth"],
+                    features_amount=self.config["best_features"]["amount"],
+                )
 
-            # self.cur_cluster_details[channel] = cluster_neurons(
-            #     self.drelu_maps[:, channel],
-            #     prev_clusters=self.cur_cluster_details[channel]["clusters"],
-            #     preference_quantile=self.prefrence_quantile,
-            #     no_converge_fail=self.cluster_no_converge_fail,
-            # )
-
-            if prev_cluster_details["failed_to_converge"]:
+                mean_dist_details = get_mean_dist(
+                    labels=labels,
+                    centers_indices=centers_indices,
+                    affinity_mat=affinity_mat,
+                )
+                clusters_details.update(mean_dist_details)
+            else:
                 print(
                     f"Caught convergence warning at batch {self.batch_idx} ",
-                    f"layer {self.layer_name}, id {prev_cluster_details['id']}\n",
+                    f"layer {self.layer_name}, id {clusters_details['id']}\n",
                     "not updating clusters",
                 )
-        return prev_cluster_details
+
+        if should_cluster and clusters_details["features_data"] is not None:
+            clusters_details["features_data"].update(
+                get_decisions_data(
+                    samples=samples,
+                    features=clusters_details["features_data"]["features"],
+                    find_best_features=self.config["best_features"]["use"],
+                    decision_method=self.config["best_features"]["method"],
+                )
+            )
 
     def _reset_drelu_maps(self) -> None:
         if self.drelu_maps is not None:
@@ -287,12 +329,13 @@ class CreluManager:
 
     def _create_grouped_clusters_templates(self):
         config = self.config["group_channels"]
-        cluster_once = self.cluster_started or self.config["cluster"]["cluster_once"]
-        if not config["group"] or (cluster_once and self.cluster_started):
+        if not config["group"] or (
+            self.config["cluster"]["cluster_once"] and self.cluster_started
+        ):
             return
         print("creating group templates")
         groups_channels = []
-        self.cur_cluster_details = []
+        self.cur_clusters_details = []
         zero_channels_mask = np.logical_not(self.drelu_maps).all(axis=(0, 2, 3))
         zero_channels = np.nonzero(zero_channels_mask)[0]
         groups_channels.append(zero_channels)
@@ -310,10 +353,10 @@ class CreluManager:
             groups_channels.extend(kmeans_channels)
         for channels in groups_channels:
             if channels.size > 0:
-                details = get_default_cluster_details(
-                    channels=channels, id=len(self.cur_cluster_details)
+                details = get_default_clusters_details(
+                    channels=channels, id=len(self.cur_clusters_details)
                 )
-                self.cur_cluster_details.append(details)
+                self.cur_clusters_details.append(details)
 
     def _update_clusters(self) -> None:
         assert (
@@ -326,40 +369,40 @@ class CreluManager:
 
         start_time = datetime.now()
         print(f"start clustering {self.layer_name}, batch {self.batch_idx}")
-
-        # with concurrent.futures.ThreadPoolExecutor(
-        #     max_workers=os.cpu_count()
-        # ) as executor:
-        #     # Map function_b to items in array concurrently
-        #     channels_details = list(executor.map(self._get_channel_clusters, channels))
-
-        new_clusters = []
-        for cluster_details in self.cur_cluster_details:
-            new_clusters.append(self._get_single_group_clusters(cluster_details))
-
+        for clusters_details in self.cur_clusters_details:
+            self._update_single_group_clusters(clusters_details)
         print(f"end clustering {datetime.now() - start_time}")
-        self.cur_cluster_details = new_clusters
 
-        prototype, crelu_channels, original_relu_channels, labels = format_clusters(
-            self.C, self.H, self.W, self.cur_cluster_details
+        features_amount = (
+            1
+            if not self.config["best_features"]["use"]
+            else self.config["best_features"]["amount"]
+        )
+        prototype, decisions, crelu_channels, original_relu_channels, labels = (
+            format_clusters(
+                C=self.C,
+                H=self.H,
+                W=self.W,
+                features_amount=features_amount,
+                clusters_details=self.cur_clusters_details,
+                id_channels=self.id_channels,
+            )
         )
         original_relu_channels[self.keep_relu_channels] = True
         self.crelu.prototype = prototype
+        self.crelu.decisions = decisions
         self.crelu.labels = labels
         self.crelu.crelu_channels = crelu_channels
         self.crelu.original_relu_channels = original_relu_channels
 
-        if not self.cluster_started:
-            self.cluster_started = True
-
-            print(f"saving path for {self.layer_name}")
-            dir = "/workspaces/secure_inference/tests/26_11_multi_prototype/all_stats/drelu_per_layer/"
-            os.makedirs(dir, exist_ok=True)
-            out_path = os.path.join(
-                dir,
-                f"{self.layer_name}.npy",
-            )
-            np.save(out_path, self.drelu_maps)
+        # print(f"saving path for {self.layer_name}")
+        # dir = "/workspaces/secure_inference/tests/26_11_multi_prototype/all_stats/drelu_per_layer/"
+        # os.makedirs(dir, exist_ok=True)
+        # out_path = os.path.join(
+        #     dir,
+        #     f"{self.layer_name}.npy",
+        # )
+        # np.save(out_path, self.drelu_maps)
 
         self._reset_drelu_maps()
 
@@ -388,6 +431,7 @@ class CreluManager:
         self.crelu.use_cluster_mean = self.use_cluster_mean
         self.crelu.is_dummy = False
         self.crelu.inter_before_activation = self.config["inter"]["before_activation"]
+        self.crelu.multi_prototype = self.config["best_features"]["use"]
 
         if not self.use_crelu_existing_params:
             self.crelu.set_default_values(set_size=False)
@@ -395,36 +439,31 @@ class CreluManager:
             self.crelu.inter = inter
         else:
             self.crelu.verify_buffers_init()
-            # self.crelu._original_relu_channels[self.id_channels] = (
-            #     False  # TODO yoni: remove!!!
-            # )
 
         self._update_sigmoid()
 
-    def _calc_inter_update_step(self) -> None:
-        inter_config = self.config["inter"]
-        update_step = inter_config["update_step"]
-        if update_step != "auto":
-            return update_step
-        update_amount = (
-            self.config["max_iters"] - self._first_inter_batch
-        ) // inter_config["update_freq"]
-        update_step = 1 / max(update_amount, 1)
-        return update_step
-
     def _update_post_stats(self) -> None:
-        for cluster_details in self.cur_cluster_details:
-            if cluster_details["all_zero"]:
+        for clusters_details in self.cur_clusters_details:
+            clusters = clusters_details.get("clusters")
+            if clusters is None:
                 continue
-            affinity_mat = get_affinity_mat(
-                self.drelu_maps[:, cluster_details["channels"]]
+            samples = format_cluster_samples(
+                self.drelu_maps[:, clusters_details["channels"]]
             )
-            (
-                cluster_details["same_label_affinity"],
-                cluster_details["diff_label_affinity"],
-                cluster_details["prototype_affinity"],
-            ) = get_mean_dist(cluster_details.get("clusters"), affinity_mat)
+            samples_features_first = samples.T
+            affinity_mat = get_affinity_mat(samples_features_first)
+
+            mean_dist_details = get_mean_dist(
+                labels=clusters["labels"],
+                centers_indices=clusters["centers_indices"],
+                affinity_mat=affinity_mat,
+            )
+            clusters_details.update(mean_dist_details)
         self._reset_drelu_maps()
+
+    @property
+    def cluster_started(self):
+        return self.batch_idx > self.config["cluster"]["start"]
 
 
 def add_crelu_hooks(

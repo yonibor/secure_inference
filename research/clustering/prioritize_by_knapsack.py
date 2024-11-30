@@ -72,7 +72,7 @@ def format_per_layer(priority: pd.DataFrame, layers_names: list) -> dict:
             elif row["preference"] == "relu":
                 keep_relu_channels.append(channel)
             else:
-                pref_dict[channel] = row["preference"]
+                pref_dict[channel] = float(row["preference"])
         formatted_priority[layer_name] = {
             "preference": pref_dict,
             "id_channels": id_channels,
