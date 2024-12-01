@@ -76,14 +76,55 @@ def get_default_clusters_details(**kwargs) -> dict:
     return details
 
 
+def cluster_by_block(
+    H: int, W: int, block_dims: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    kernel_height, kernel_width = block_dims
+
+    # Compute the number of blocks along each axis
+    num_blocks_height = (H + kernel_height - 1) // kernel_height
+    num_blocks_width = (W + kernel_width - 1) // kernel_width
+
+    # Compute row and column indices for balanced blocks
+    row_indices = np.linspace(0, num_blocks_height, H, endpoint=False, dtype=int)
+    col_indices = np.linspace(0, num_blocks_width, W, endpoint=False, dtype=int)
+
+    # Create the label grid and ravel to 1D
+    label_array = row_indices[:, None] * num_blocks_width + col_indices
+    labels = label_array.ravel()
+
+    # Compute the center coordinates of each block
+    row_centers = (
+        np.linspace(0, H, num_blocks_height + 1, dtype=int)[:-1] + kernel_height // 2
+    ).clip(0, H - 1)
+    col_centers = (
+        np.linspace(0, W, num_blocks_width + 1, dtype=int)[:-1] + kernel_width // 2
+    ).clip(0, W - 1)
+
+    # Create the grid of centers and ravel to 1D
+    row_grid, col_grid = np.meshgrid(row_centers, col_centers, indexing="ij")
+    centers = np.stack([row_grid.ravel(), col_grid.ravel()], axis=1)
+    centers = np.ravel_multi_index(centers.T, (H, W))
+
+    return labels, centers
+
+
 def cluster_neurons(
     samples: np.ndarray,
     affinity_mat: np.ndarray,
+    use_block_clusters: bool,
+    H: int,
+    W: int,
     no_converge_fail: bool = True,
     preference_quantile: Optional[float] = None,
+    block_dims: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool]:
     labels = centers_indices = None
     all_zero = failed_to_converge = False
+    if use_block_clusters:
+        assert block_dims is not None
+        labels, centers_indices = cluster_by_block(H=H, W=W, block_dims=block_dims)
+        return labels, centers_indices, all_zero, failed_to_converge
     if not np.any(samples):
         all_zero = True
         return labels, centers_indices, all_zero, failed_to_converge

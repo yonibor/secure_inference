@@ -33,6 +33,7 @@ class CreluManager:
         layer_name: str,
         config: dict,
         preference: Dict[int, float],
+        blocks: Dict[int, np.ndarray],
         id_channels: List[int],
         keep_relu_channels: List[int],
         C: int,
@@ -53,6 +54,7 @@ class CreluManager:
         self.use_cluster_mean = use_cluster_mean
         self.use_crelu_existing_params = use_crelu_existing_params
         self.preference = preference
+        self.blocks = blocks
         self.id_channels = id_channels
         # self.id_channels = [
         #     c for c in range(self.C) if c != 0
@@ -273,11 +275,16 @@ class CreluManager:
         if not finished_clustering and should_cluster:
             affinity_mat = get_affinity_mat(samples)
             preference = self.preference[clusters_details["channels"][0]]
+            block_dims = self.blocks[clusters_details["channels"][0]]
             labels, centers_indices, all_zero, failed_to_converge = cluster_neurons(
                 samples=samples,
+                affinity_mat=affinity_mat,
+                use_block_clusters=self.config["cluster"]["use_blocks"],
+                H=self.H,
+                W=self.W,
                 preference_quantile=preference,
                 no_converge_fail=self.cluster_no_converge_fail,
-                affinity_mat=affinity_mat,
+                block_dims=block_dims,
             )
             clusters_details.update(
                 all_zero=all_zero, failed_to_converge=failed_to_converge
@@ -421,9 +428,11 @@ class CreluManager:
         return inter_value
 
     def _update_inter(self) -> None:
+        cooldown = self.config["inter"].get("cooldown", 0)
+        end = self.config["cluster"]["end"] - cooldown
         new_inetr = self._interpulate_scheduler(
             start_step=self.config["cluster"]["start"],
-            end_step=self.config["cluster"]["end"],
+            end_step=end,
             start_value=self.config["inter"]["start_value"],
             end_value=self.config["inter"]["end_value"],
         )

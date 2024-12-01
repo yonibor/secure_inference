@@ -61,7 +61,8 @@ def run_train(work_dir, validate, eval_interval, plot, batch_size, ckpt, hooks_k
     cfg.data.workers_per_gpu = 0
     cfg.data.persistent_workers = False
 
-    cfg.optimizer.lr *= 0.2**3
+    # cfg.optimizer.lr *= 0.2**3
+    cfg.optimizer.lr = 0.0004
 
     # cfg.runner.max_epochs = 3
     cfg.runner.type = "IterBasedRunner"
@@ -128,7 +129,8 @@ def run_train(work_dir, validate, eval_interval, plot, batch_size, ckpt, hooks_k
     hooks, max_iters, cluster_end = _add_crelu_hooks(
         model, work_dir, batch_size=batch_size, **hooks_kwargs
     )
-    cfg.checkpoint_config["interval"] = cluster_end + 100
+    # cfg.checkpoint_config["interval"] = cluster_end + 100
+    cfg.checkpoint_config["interval"] = 10000000
     cfg.runner.max_iters = max_iters
     folder_name = os.path.basename(work_dir.rstrip("/"))
     parent_folder_name = os.path.normpath(work_dir).split(os.sep)[-2]
@@ -194,6 +196,7 @@ def _add_crelu_hooks(
     batch_size,
     clustering_priority_path,
     layer_names,
+    use_blocks,
     **kwargs,
 ):
     update_on_start = True
@@ -226,6 +229,7 @@ def _add_crelu_hooks(
             #     "quantile_min": 0.1,
             # },
             "cooldown": cluster_cooldown,
+            "use_blocks": use_blocks,
             "use": True,
         },
         "inter": inter_config,
@@ -353,7 +357,7 @@ def main():
     )
 
     best_features_config = dict(
-        use=False,
+        use=True,
         depth=3,
         amount=4,
         method="ratio",
@@ -365,10 +369,10 @@ def main():
     )
 
     warmup = 20
-    clustering_iters = 1000
-    cooldown = 3000
+    clustering_iters = 1500
+    cooldown = 4500
 
-    inter_config = dict(start_value=0, end_value=1, before_activation=False)
+    inter_config = dict(start_value=0, end_value=1, before_activation=False, cooldown=0)
 
     ckpt = "/workspaces/secure_inference/tests/resnet18_10_8/latest.pth"
     # ckpt = "/workspaces/secure_inference/tests/24_11_prioritize/full_08_v3/latest.pth"
@@ -376,35 +380,42 @@ def main():
     # perfs = np.concatenate([np.arange(0.2, 0.8, 0.1), np.arange(0.25, 0.8, 0.1)])
 
     # print(f"------------------perf {perf}----------------")
-    run_train(
-        work_dir=f"/workspaces/secure_inference/tests/26_11_multi_prototype/layer3_0_1_ref",
-        validate=True,
-        # eval_interval=200,
-        eval_interval=500,
-        plot=False,
-        ckpt=ckpt,
-        # layer_names=Params().LAYER_NAMES,
-        hooks_kwargs=dict(
-            layer_names=layers,
-            cluster_update_freq=100,
-            warmup=warmup,
-            cluster_cooldown=cooldown,
-            clustering_iters=clustering_iters,
-            drelu_stats_batch_amount=10,
-            cluster_once=False,
-            # preference_start=perf,
-            use_crelu_existing_params=False,
-            group_channels_config=group_channels_config,
-            sigmoid_config=sigmoid_config,
-            inter_config=inter_config,
-            id_config=id_config,
-            best_features_config=best_features_config,
-            clustering_priority_path="/workspaces/secure_inference/tests/general_stats/prioritize_29_11_24.csv",
-            # clustering_stats_dir="/workspaces/secure_inference/tests/22_cluster_amount_stats",
-            # knapsack_path="/workspaces/secure_inference/tests/distortion_extraction_22_11_512/block_spec/0.08.pickle",
-        ),
-        batch_size=128,
-    )
+    for layer_name in Params().LAYER_NAMES:
+        for use_best_features in [True, False]:
+            if layer_name == "stem":
+                print("skipping!")
+                continue
+            best_features_config["use"] = use_best_features
+            run_train(
+                work_dir=f"/workspaces/secure_inference/tests/30_11_per_layer/{layer_name}_best_features_{use_best_features}",
+                validate=True,
+                # eval_interval=200,
+                eval_interval=750,
+                plot=False,
+                ckpt=ckpt,
+                # layer_names=Params().LAYER_NAMES,
+                hooks_kwargs=dict(
+                    layer_names=[layer_name],
+                    cluster_update_freq=250,
+                    warmup=warmup,
+                    cluster_cooldown=cooldown,
+                    clustering_iters=clustering_iters,
+                    drelu_stats_batch_amount=10,
+                    cluster_once=False,
+                    # preference_start=perf,
+                    use_crelu_existing_params=False,
+                    group_channels_config=group_channels_config,
+                    sigmoid_config=sigmoid_config,
+                    inter_config=inter_config,
+                    id_config=id_config,
+                    best_features_config=best_features_config,
+                    clustering_priority_path="/workspaces/secure_inference/tests/general_stats/prioritize_29_11_24.csv",
+                    use_blocks=False,
+                    # clustering_stats_dir="/workspaces/secure_inference/tests/22_cluster_amount_stats",
+                    # knapsack_path="/workspaces/secure_inference/tests/distortion_extraction_22_11_512/block_spec/0.08.pickle",
+                ),
+                batch_size=128,
+            )
 
 
 if __name__ == "__main__":

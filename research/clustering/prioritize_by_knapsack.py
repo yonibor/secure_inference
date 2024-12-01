@@ -62,7 +62,7 @@ def _get_preference(
 def format_per_layer(priority: pd.DataFrame, layers_names: list) -> dict:
     formatted_priority = {}
     for layer_name in layers_names:
-        pref_dict = {}
+        pref_dict, block_dict = {}, {}
         id_channels = []
         keep_relu_channels = []
         for _, row in priority.query("layer_name == @layer_name").iterrows():
@@ -73,8 +73,12 @@ def format_per_layer(priority: pd.DataFrame, layers_names: list) -> dict:
                 keep_relu_channels.append(channel)
             else:
                 pref_dict[channel] = float(row["preference"])
+                block_dict[channel] = np.array(
+                    [int(row["block_h"]), int(row["block_w"])]
+                )
         formatted_priority[layer_name] = {
             "preference": pref_dict,
+            "blocks": block_dict,
             "id_channels": id_channels,
             "keep_relu_channels": keep_relu_channels,
         }
@@ -93,6 +97,7 @@ def prioritize_channels(
     for layer_name, layer_knapsack_amounts in knapsack_amounts.items():
         C, H, W = dims[layer_name]
         for channel in range(C):
+            cur_knapsack_block = knapsack_results[layer_name][channel]
             cur_knapsack_amount = layer_knapsack_amounts[channel]
             channel_clustering_amount = clustering_amounts.query(
                 "layer_name == @layer_name and channel == @channel"
@@ -101,6 +106,8 @@ def prioritize_channels(
                 "layer_name": layer_name,
                 "channel": channel,
                 "knapsack_amount": cur_knapsack_amount,
+                "block_h": cur_knapsack_block[0],
+                "block_w": cur_knapsack_block[1],
             }
             match["preference"], match["cur_amount"] = _get_preference(
                 cur_knapsack_amount, channel_clustering_amount, H, W
@@ -108,3 +115,18 @@ def prioritize_channels(
             matches.append(match)
     matches = pd.DataFrame(matches)
     return matches
+
+
+if __name__ == "__main__":
+    from research.distortion.parameters.classification.resent.resnet18_8xb16_cifar100 import (
+        Params,
+    )
+
+    dims = Params().LAYER_NAME_TO_DIMS
+    knapsack_path = "/workspaces/secure_inference/tests/distortion_extraction_22_11_512/block_spec/0.08.pickle"
+    stats_dir = "/workspaces/secure_inference/tests/22_cluster_amount_stats"
+    output_path = (
+        "/workspaces/secure_inference/tests/general_stats/prioritize_29_11_24.csv"
+    )
+    post_stats = prioritize_channels(stats_dir, knapsack_path, dims)
+    post_stats.to_csv(output_path, index=False)
