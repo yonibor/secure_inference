@@ -154,6 +154,7 @@ def get_mean_dist(
 ) -> Dict[str, np.ndarray]:
     labels = labels.squeeze()
     same_label_mask = labels[:, None] == labels[None, :]
+    same_label_affinity = diff_label_affinity = 0
     if same_label_mask.any():
         same_label_affinity = affinity_mat[same_label_mask].mean()
     if not same_label_mask.all():
